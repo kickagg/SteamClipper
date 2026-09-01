@@ -31,13 +31,23 @@ Desktop\Abrir.bat        janela única com o vídeo dentro
 Clique numa gravação, arraste na linha do tempo para marcar o trecho, escolha o
 preset e exporte. Atalhos: `espaço` play, `i` / `o` marcam início e fim, `←` `→` 5s.
 
-## Os três presets
+## Presets
 
 | Preset | Saída | Para quê |
 |---|---|---|
-| **Entrega** | H.264 High, CFR 60 fps | qualquer player, Premiere, After Effects, YouTube |
+| **Entrega** | H.264 High, CFR 60 fps, resolução original | qualquer player, Premiere, After Effects, YouTube |
 | **Original** | HEVC copiado, sem reprocessar | arquivar sem perda (mantém VFR — evite no Premiere) |
+| **Compacto** | H.265 em 1080p, compressão alta | enviar por Discord ou WhatsApp (~4× menor) |
 | **Edição** | DNxHR HQ `.mov` + PCM | grading pesado (~5,6 GB/min) |
+
+O modal de exportação abre com o preset escolhido e deixa ajustar tudo à mão:
+codec, contêiner, resolução, taxa de quadros, qualidade (CQ do NVENC, com nome)
+ou bitrate fixo, além da pasta de destino — que fica guardada como padrão.
+
+A estimativa de tamanho vem de medições reais do encoder nesta máquina, não de
+chute: o erro fica abaixo de 7% nas combinações testadas. Uma exportação em
+andamento pode ser cancelada; o ffmpeg é encerrado e o arquivo pela metade é
+apagado.
 
 ## Como funciona
 
@@ -85,6 +95,12 @@ Browser/       servidor + UI web
 Desktop/       app em tkinter com o mpv embutido
 Cli/           script PowerShell original (ffmpeg direto)
 ```
+
+## Onde os arquivos são salvos
+
+Por padrão, o `ExportDirectory` do próprio Steam. Ao escolher outra pasta no modal
+ela vira o padrão e fica em `%LOCALAPPDATA%\SteamClipper\settings.json`. Se a
+pasta configurada no Steam não existir mais, o app cai em `Vídeos\SteamClipper`.
 
 ## Limitação conhecida
 

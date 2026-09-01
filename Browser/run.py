@@ -36,7 +36,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from steamclipper import Config, Jobs, Mpv, scan_sessions, strip, thumb, virtual  # noqa: E402
+from steamclipper import (PRESETS, Config, Jobs, Mpv, scan_sessions, strip,
+                          thumb, virtual)  # noqa: E402
 from steamclipper.steam import chunk_list                                        # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -102,7 +103,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"sessions": scan_sessions(CFG),
                                    "out_dir": str(CFG.output),
                                    "mpv": PLAYER.available,
-                                   "problems": CFG.problems()})
+                                   "problems": CFG.problems(),
+                                   "presets": {k: {"label": v["label"],
+                                                   "hint": v["hint"]}
+                                               for k, v in PRESETS.items()}})
 
             if u.path == "/api/thumb":
                 p = thumb(CFG, q["session"][0], float(q.get("t", ["0"])[0]))
@@ -156,9 +160,22 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/export":
                 jid = JOBS.submit(b["session"], b.get("preset", "deliver"),
                                   float(b.get("start", 0)), float(b.get("duration", 0)),
-                                  int(b.get("quality", 19)),
-                                  b.get("name", b["session"]))
+                                  b.get("name", b["session"]), b.get("opts"))
                 return self._json({"job": jid})
+
+            if u.path == "/api/export/cancel":
+                return self._json(JOBS.cancel(b["job"]))
+
+            if u.path == "/api/export/clear":
+                JOBS.clear_finished()
+                return self._json({"ok": True})
+
+            if u.path == "/api/output":
+                try:
+                    CFG.set_output(b["path"])
+                    return self._json({"ok": True, "out_dir": str(CFG.output)})
+                except OSError as e:
+                    return self._json({"error": str(e)}, 400)
 
             if u.path == "/api/reveal":
                 CFG.output.mkdir(parents=True, exist_ok=True)

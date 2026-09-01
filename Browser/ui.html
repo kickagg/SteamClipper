@@ -173,6 +173,7 @@
 "use strict";
 const $ = s => document.querySelector(s);
 let SESS = [], CUR = null, PRESET = "deliver", IN = 0, OUT = 0, MPVOK = false;
+let PRESETS = {}, OUTDIR = "";
 let POS = 0, PLAYING = false, MPVON = false, poller = null;
 
 const fmt = s => {
@@ -197,6 +198,7 @@ const mpv = (action, value) => fetch("/api/mpv/cmd", {method:"POST",
 async function load(){
   const r = await fetch("/api/sessions").then(r=>r.json());
   SESS = r.sessions; MPVOK = r.mpv;
+  PRESETS = r.presets || {}; OUTDIR = r.out_dir || "";
   const L = $("#list"); L.innerHTML = "";
   if(!SESS.length){ L.innerHTML='<div style="padding:20px;color:var(--tx3)">Nenhuma gravação encontrada.</div>'; return; }
   SESS.slice().reverse().forEach(s=>{
@@ -292,10 +294,9 @@ function render(){
       </div>
 
       <div class="presets">
-        ${pr("deliver","Entrega","H.264 60 fps constante. Abre em qualquer player e importa limpo no Premiere e no After Effects.")}
-        ${pr("raw","Original","Cópia do HEVC sem reprocessar. Instantâneo e sem perda — mas mantém o framerate variável, evite no Premiere.")}
-        ${pr("edit","Edição","DNxHR HQ para grading pesado e After Effects. Cerca de 5,6 GB por minuto.")}
+        ${Object.entries(PRESETS).map(([k,v]) => pr(k, v.label, v.hint)).join("")}
       </div>
+      <div class="hint">Os arquivos vão para <b>${esc(OUTDIR)}</b></div>
 
       <div class="row">
         <button class="btn p" id="bExp">Exportar trecho</button>
@@ -436,17 +437,26 @@ async function poll(){
   const list = Object.values(jobs), box = $("#jobs");
   box.classList.toggle("hide", !list.length);
   box.innerHTML = list.reverse().map(j=>{
-    const cls = j.status==="pronto"?"ok":j.status==="erro"?"er":"go";
+    const cls = j.status==="pronto"?"ok":(j.status==="erro"||j.status==="cancelado")?"er":"go";
     const txt = j.status==="pronto" ? `pronto · ${(j.size/1048576).toFixed(1)} MB`
-              : j.status==="erro" ? "erro" : j.status;
+              : j.status==="erro" ? "erro"
+              : j.status==="cancelado" ? "cancelado" : j.status;
+    const running = j.status!=="pronto" && j.status!=="erro" && j.status!=="cancelado";
     return `<div class="job">
       <div class="jn">${esc(j.label||j.session)} <span style="color:var(--tx3)">· ${j.preset}</span></div>
       <div class="bar"><i style="width:${j.pct||0}%"></i></div>
-      <div class="st ${cls}" title="${esc(j.error||"")}">${txt}</div></div>`;
+      <div class="st ${cls}" title="${esc(j.error||"")}">${txt}</div>
+      ${running ? `<button class="btn sm" onclick="cancelJob('${j.id}')">Cancelar</button>` : ""}
+      </div>`;
   }).join("");
   if(list.some(j=>j.status!=="pronto"&&j.status!=="erro")) setTimeout(poll,700);
 }
 
+window.cancelJob = async id => {
+  await fetch("/api/export/cancel", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify({job:id})});
+  poll();
+};
 $("#bReload").onclick = load;
 $("#bFolder").onclick = () => fetch("/api/reveal",{method:"POST"});
 load();

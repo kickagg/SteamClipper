@@ -153,6 +153,29 @@ def cache_dir() -> Path:
     return p
 
 
+def settings_file() -> Path:
+    p = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        import json
+        return json.loads(settings_file().read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data: dict):
+    try:
+        import json
+        settings_file().write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                                   "utf-8")
+    except OSError:
+        pass
+
+
 class Config:
     """Caminhos resolvidos uma vez, usados por Browser e Desktop."""
 
@@ -163,8 +186,20 @@ class Config:
         self.steam = find_steam()
         self.recordings, self.userdir = find_recordings(self.steam)
         self.libmpv = find_libmpv()
-        self.output = default_output()
         self.cache = cache_dir()
+
+        # A pasta escolhida pelo usuario ganha do ExportDirectory do Steam: aquele
+        # aponta para onde o Steam exporta, e pode nem existir mais.
+        self.settings = load_settings()
+        saved = self.settings.get("output")
+        self.output = Path(saved) if saved else default_output()
+
+    def set_output(self, path) -> Path:
+        self.output = Path(path)
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.settings["output"] = str(self.output)
+        save_settings(self.settings)
+        return self.output
 
     @property
     def video_dir(self) -> Path | None:

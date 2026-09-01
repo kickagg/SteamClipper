@@ -21,11 +21,13 @@ import tkinter as tk
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tkinter import font as tkfont
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from steamclipper import Config, Jobs, Mpv, PRESETS, scan_sessions, thumb, virtual  # noqa: E402
+from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
+                          Config, Jobs, Mpv, estimate_mb, preset_opts,
+                          scan_sessions, thumb, virtual)  # noqa: E402
 from steamclipper.steam import chunk_list                                          # noqa: E402
 
 CFG = Config()
@@ -38,6 +40,10 @@ AC, OK, WARN, ERR = "#4a9eff", "#3fb950", "#d29922", "#f85149"
 
 TILE_H = 56                       # altura da faixa da linha do tempo
 TILE_W = round(TILE_H * 16 / 9)   # 16:9, para o quadro nao distorcer
+
+# CQ do NVENC com nome: o numero sozinho nao diz nada a quem so quer exportar.
+QUALITY_LEVELS = {15: "Máxima (15)", 19: "Alta (19)", 23: "Média (23)",
+                  27: "Econômica (27)", 32: "Compressão forte (32)"}
 
 
 # --------------------------------------------------- servidor so para o mpv
@@ -128,6 +134,10 @@ def parse_t(v: str):
     return p[0] if p else None
 
 
+def _nearest_quality(q: int) -> int:
+    return min(QUALITY_LEVELS, key=lambda k: abs(k - q))
+
+
 def gb(b: int) -> str:
     return f"{b / 1073741824:.2f} GB"
 
@@ -184,6 +194,237 @@ class Flat(tk.Label):
     def recolor(self, bg):
         self._bg = bg
         self.config(bg=bg)
+
+
+class ExportDialog(tk.Toplevel):
+    """Modal de exportacao: preset, ajustes finos, pasta e estimativa."""
+
+    def __init__(self, app, session, start, dur, name):
+        super().__init__(app.root)
+        self.app, self.session, self.start, self.dur = app, session, start, dur
+        self.result = None
+        self.title("Exportar trecho")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app.root)
+
+        self.preset = tk.StringVar(value=app.preset)
+        o = preset_opts(app.preset)
+        self.codec = tk.StringVar(value=o["codec"])
+        self.container = tk.StringVar(value=o["container"])
+        self.scale = tk.StringVar(value=str(o.get("scale", 0)))
+        self.fps = tk.StringVar(value=str(o.get("fps", 60)))
+        self.quality = tk.IntVar(value=o.get("quality", 19))
+        self.bitrate = tk.StringVar(value="")
+        self.outdir = tk.StringVar(value=str(CFG.output))
+        self.menus = []          # (var, wrap) para _refresh_menus
+        self.fname = tk.StringVar(value=name)
+
+        pad = {"padx": 22}
+        tk.Label(self, text="Exportar trecho", bg=BG, fg=TX, font=app.fh,
+                 anchor="w").pack(fill="x", pady=(18, 2), **pad)
+        tk.Label(self, text=f"{session['game']} · {fmt(start)} → {fmt(start + dur)}"
+                            f"  ({fmt(dur)})",
+                 bg=BG, fg=TX2, font=app.fs, anchor="w").pack(fill="x", pady=(0, 14), **pad)
+
+        # ---- presets
+        pr = tk.Frame(self, bg=BG); pr.pack(fill="x", **pad)
+        self.pbtn = {}
+        for key, meta in PRESETS.items():
+            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1, cursor="hand2",
+                         highlightbackground=AC if key == app.preset else LINE)
+            b.pack(side="left", fill="both", expand=True, padx=(0, 8))
+            tk.Label(b, text=meta["label"], bg=PANEL2, fg=TX, font=app.fb).pack(pady=(8, 1))
+            tk.Label(b, text="", bg=PANEL2, fg=TX3, font=app.fs,
+                     name="est").pack(pady=(0, 8))
+            for w in (b, *b.winfo_children()):
+                w.bind("<Button-1>", lambda e, k=key: self._pick(k))
+            Tooltip(b, meta["hint"])
+            self.pbtn[key] = b
+
+        tk.Frame(self, bg=LINE, height=1).pack(fill="x", pady=16, **pad)
+
+        # ---- ajustes finos
+        grid = tk.Frame(self, bg=BG); grid.pack(fill="x", **pad)
+        grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(3, weight=1)
+
+        def row(r, c, label, widget, tip):
+            tk.Label(grid, text=label, bg=BG, fg=TX3, font=app.fs,
+                     anchor="w").grid(row=r, column=c, sticky="w", pady=(0, 2))
+            widget.grid(row=r + 1, column=c, sticky="ew", padx=(0, 14), pady=(0, 12))
+            Tooltip(widget, tip)
+
+        row(0, 0, "CODEC", self._menu(grid, self.codec, list(CODECS),
+                                      lambda v: (self._sync_container(), self._est()),
+                                      lambda k: CODECS[k]),
+            "H.264 abre em qualquer lugar. H.265 gera metade do tamanho mas\n"
+            "alguns players e editores antigos não reconhecem.\n"
+            "Cópia não reprocessa: instantâneo, porém mantém o VFR.")
+        row(0, 2, "FORMATO", self._menu(grid, self.container, list(CONTAINERS),
+                                        lambda v: None, lambda k: CONTAINERS[k]),
+            "MP4 é o mais compatível. MKV aceita qualquer codec.\n"
+            "MOV é o padrão para DNxHR na edição.")
+        row(2, 0, "RESOLUÇÃO", self._menu(grid, self.scale, [str(k) for k in SCALES],
+                                          lambda v: self._est(),
+                                          lambda k: SCALES[int(k)]),
+            "Reduzir a resolução é o jeito mais eficaz de encolher o arquivo.\n"
+            "Original mantém 2560×1440 da gravação.")
+        row(2, 2, "TAXA DE QUADROS", self._menu(grid, self.fps,
+                                                [str(k) for k in FPS_CHOICES],
+                                                lambda v: self._est(),
+                                                lambda k: FPS_CHOICES[int(k)]),
+            "60 fps preserva a fluidez do jogo.\n"
+            "30 fps corta o tamanho quase pela metade.\n"
+            "Original mantém o framerate variável — evite para editar.")
+
+        # O tk.Scale fica quebrado no Windows com tema escuro; um menu nomeado
+        # ainda comunica melhor que um numero solto.
+        self.qvar = tk.StringVar(value=str(self.quality.get()))
+        self.qmenu = self._menu(grid, self.qvar, [str(k) for k in QUALITY_LEVELS],
+                                lambda v: (self.quality.set(int(v)), self._est()),
+                                lambda k: QUALITY_LEVELS[int(k)])
+        row(4, 0, "QUALIDADE", self.qmenu,
+            "CQ do NVENC: menor = melhor imagem e arquivo maior.\n"
+            "Máxima ≈ sem perda visível · Alta é o padrão para postar.\n"
+            "Ignorado quando você define um bitrate fixo abaixo.")
+
+        bf = tk.Frame(grid, bg=BG)
+        self.e_br = tk.Entry(bf, textvariable=self.bitrate, bg=PANEL2, fg=TX,
+                             font=app.fm, bd=0, width=10, insertbackground=TX,
+                             justify="center")
+        self.e_br.pack(side="left", ipady=4)
+        self.e_br.bind("<KeyRelease>", lambda e: self._est())
+        tk.Label(bf, text="kbps  (vazio = automático)", bg=BG, fg=TX3,
+                 font=app.fs).pack(side="left", padx=8)
+        row(4, 2, "BITRATE FIXO", bf,
+            "Deixe vazio para o encoder escolher pela qualidade.\n"
+            "Preencha quando precisar de um tamanho previsível —\n"
+            "ex.: 8000 kbps ≈ 60 MB por minuto.")
+
+        # ---- destino
+        tk.Frame(self, bg=LINE, height=1).pack(fill="x", pady=(4, 16), **pad)
+        df = tk.Frame(self, bg=BG); df.pack(fill="x", **pad)
+        tk.Label(df, text="NOME DO ARQUIVO", bg=BG, fg=TX3, font=app.fs,
+                 anchor="w").pack(fill="x")
+        tk.Entry(df, textvariable=self.fname, bg=PANEL2, fg=TX, font=app.f, bd=0,
+                 insertbackground=TX).pack(fill="x", ipady=5, pady=(2, 12))
+        tk.Label(df, text="SALVAR EM", bg=BG, fg=TX3, font=app.fs,
+                 anchor="w").pack(fill="x")
+        pf = tk.Frame(df, bg=BG); pf.pack(fill="x", pady=(2, 0))
+        e = tk.Entry(pf, textvariable=self.outdir, bg=PANEL2, fg=TX2, font=app.fs,
+                     bd=0, insertbackground=TX)
+        e.pack(side="left", fill="x", expand=True, ipady=5)
+        b = Flat(pf, "Procurar…", self._browse, font=app.fs)
+        b.pack(side="left", padx=(8, 0))
+        Tooltip(b, "Escolhe a pasta de destino e guarda como padrão")
+
+        self.est_lbl = tk.Label(self, text="", bg=BG, fg=TX2, font=app.fs, anchor="w")
+        self.est_lbl.pack(fill="x", pady=(16, 0), **pad)
+
+        act = tk.Frame(self, bg=BG); act.pack(fill="x", pady=(12, 20), **pad)
+        Flat(act, "Exportar", self._ok, bg=AC, fg="white", pad=(22, 9),
+             font=app.fb).pack(side="right")
+        Flat(act, "Cancelar", self.destroy, pad=(18, 9), font=app.f).pack(side="right", padx=8)
+
+        self._sync_container()
+        self._est()
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Return>", lambda e: self._ok())
+        self.update_idletasks()
+        x = app.root.winfo_rootx() + (app.root.winfo_width() - self.winfo_width()) // 2
+        y = app.root.winfo_rooty() + max(20, (app.root.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+    def _menu(self, parent, var, values, on_change, fmt_fn):
+        wrap = tk.Frame(parent, bg=PANEL2)
+        lbl = tk.Label(wrap, text=fmt_fn(var.get()), bg=PANEL2, fg=TX,
+                       font=self.app.fs, anchor="w", padx=10, pady=6, cursor="hand2")
+        lbl.pack(fill="x")
+        menu = tk.Menu(wrap, tearoff=0, bg=PANEL2, fg=TX, font=self.app.fs,
+                       activebackground=AC, activeforeground="white", bd=0)
+        for v in values:
+            menu.add_command(label=fmt_fn(v),
+                             command=lambda x=v: (var.set(x),
+                                                  lbl.config(text=fmt_fn(x)),
+                                                  on_change(x)))
+        lbl.bind("<Button-1>",
+                 lambda e: menu.tk_popup(lbl.winfo_rootx(),
+                                         lbl.winfo_rooty() + lbl.winfo_height()))
+        wrap._label, wrap._fmt = lbl, fmt_fn
+        self.menus.append((var, wrap))
+        return wrap
+
+    def _pick(self, key):
+        self.preset.set(key)
+        o = preset_opts(key)
+        for k, b in self.pbtn.items():
+            b.config(highlightbackground=AC if k == key else LINE)
+        for var, name in ((self.codec, "codec"), (self.container, "container")):
+            var.set(o[name])
+        self.scale.set(str(o.get("scale", 0)))
+        self.fps.set(str(o.get("fps", 60)))
+        self.quality.set(o.get("quality", 19))
+        self.qvar.set(str(_nearest_quality(o.get("quality", 19))))
+        self.quality.set(int(self.qvar.get()))
+        self.bitrate.set("")
+        self._refresh_menus()
+        self._sync_container()
+        self._est()
+
+    def _refresh_menus(self):
+        """Reescreve o rotulo de cada menu depois que um preset troca as opcoes."""
+        for var, wrap in self.menus:
+            wrap._label.config(text=wrap._fmt(var.get()))
+
+    def _sync_container(self):
+        """Combinacoes que nao fazem sentido: DNxHR em MP4, copia em MOV."""
+        c = self.codec.get()
+        forced = {"dnxhr": "mov"}.get(c)
+        if forced and self.container.get() != forced:
+            self.container.set(forced)
+        on = c in ("h264", "hevc")
+        self.qmenu._label.config(fg=TX if on else TX3, cursor="hand2" if on else "")
+        self.e_br.config(state="normal" if on else "disabled")
+
+    def _opts(self) -> dict:
+        try:
+            br = int(self.bitrate.get().strip() or 0)
+        except ValueError:
+            br = 0
+        return {"codec": self.codec.get(), "container": self.container.get(),
+                "scale": int(self.scale.get()), "fps": int(self.fps.get()),
+                "quality": int(self.quality.get()), "bitrate": br,
+                "outdir": self.outdir.get().strip()}
+
+    def _est(self, *_):
+        o = self._opts()
+        src = self.session['bytes'] / self.session['seconds']  # MB/s reais
+        mb = estimate_mb(o, self.dur, src / 1048576)
+        self.est_lbl.config(text=f"Estimativa: ~{mb:.0f} MB para {fmt(self.dur)} "
+                                 f"de vídeo (valor aproximado)")
+        for key, b in self.pbtn.items():
+            est = estimate_mb(preset_opts(key), self.dur, src / 1048576)
+            b.children["est"].config(text=f"~{est:.0f} MB")
+
+    def _browse(self):
+        d = filedialog.askdirectory(parent=self, initialdir=self.outdir.get(),
+                                    title="Pasta para os arquivos exportados")
+        if d:
+            self.outdir.set(str(Path(d)))
+
+    def _ok(self):
+        o = self._opts()
+        if o["outdir"]:
+            try:
+                CFG.set_output(o["outdir"])       # vira o padrao das proximas vezes
+            except OSError as e:
+                messagebox.showerror("SteamClipper", f"Pasta inválida:\n{e}",
+                                     parent=self)
+                return
+        self.result = (self.preset.get(), o, self.fname.get().strip() or "clipe")
+        self.destroy()
 
 
 # ------------------------------------------------------------------- app
@@ -529,11 +770,32 @@ class App:
 
     def _jobs_bar(self):
         self.jobs_frame = tk.Frame(self.root, bg=PANEL)
-        self.jobs_lbl = tk.Label(self.jobs_frame, text="", bg=PANEL, fg=TX2,
-                                 font=self.fs, anchor="w")
-        self.jobs_lbl.pack(fill="x", padx=20, pady=7)
+        inner = tk.Frame(self.jobs_frame, bg=PANEL)
+        inner.pack(fill="x", padx=20, pady=7)
+        self.jobs_lbl = tk.Label(inner, text="", bg=PANEL, fg=TX2, font=self.fs,
+                                 anchor="w")
+        self.jobs_lbl.pack(side="left", fill="x", expand=True)
 
-    # ---------------------------------------------------------- acoes
+        self.jobs_bar = tk.Canvas(inner, width=150, height=5, bg="#232c37",
+                                  highlightthickness=0)
+        self.jobs_bar.pack(side="left", padx=12)
+
+        self.jobs_cancel = Flat(inner, "Cancelar", self._cancel_job, font=self.fs)
+        Tooltip(self.jobs_cancel,
+                "Interrompe a exportação e apaga o arquivo pela metade")
+        self.jobs_close = Flat(inner, "✕", self._clear_jobs, pad=(9, 5), font=self.fs)
+        Tooltip(self.jobs_close, "Limpa a lista")
+        self._active_job = None
+
+    def _cancel_job(self):
+        if self._active_job:
+            JOBS.cancel(self._active_job)
+
+    def _clear_jobs(self):
+        JOBS.clear_finished()
+        if not JOBS.snapshot():
+            self.jobs_frame.pack_forget()
+
     def select(self, s):
         self.cur = s
         self.inp, self.out = 0.0, min(90.0, s["seconds"])
@@ -658,8 +920,15 @@ class App:
         if not self.cur:
             return
         dur = max(0.5, self.out - self.inp)
-        JOBS.submit(self.cur["id"], self.preset, self.inp, dur,
-                    int(self.quality.get()), self.e_name.get().strip() or self.cur["game"])
+        dlg = ExportDialog(self, self.cur, self.inp, dur,
+                           self.e_name.get().strip() or self.cur["game"])
+        self.root.wait_window(dlg)
+        if not dlg.result:
+            return
+        preset, opts, name = dlg.result
+        self.preset = preset
+        self.set_preset(preset)
+        JOBS.submit(self.cur["id"], preset, self.inp, dur, name, opts)
         self.jobs_frame.pack(fill="x", side="bottom")
 
     def quit(self):
@@ -794,6 +1063,12 @@ class App:
         self._sync(); self._draw_tl()
 
     # ------------------------------------------------------------ loop
+    def _draw_progress(self, pct, color):
+        c = self.jobs_bar
+        c.delete("all")
+        c.create_rectangle(0, 0, 150 * max(0, min(100, pct)) / 100, 5,
+                           fill=color, outline="")
+
     def _tick(self):
         st = self.mpv.state()
         if st.get("open"):
@@ -805,20 +1080,37 @@ class App:
 
         jobs = JOBS.snapshot()
         if jobs:
-            act = [j for j in jobs.values() if j["status"] not in ("pronto", "erro")]
+            act = [j for j in jobs.values()
+                   if j["status"] not in ("pronto", "erro", "cancelado")]
+            self._active_job = act[0]["id"] if act else None
             if act:
                 j = act[0]
-                self.jobs_lbl.config(text=f"{j['label']} · {j['status']} {j.get('pct',0)}%",
-                                     fg=AC)
+                est = j.get("estimate_mb")
+                extra = f" · ~{est:.0f} MB previstos" if est else ""
+                self.jobs_lbl.config(text=f"{j['label']} · {j['status']} "
+                                          f"{j.get('pct', 0)}%{extra}", fg=AC)
+                self.jobs_cancel.pack(side="left", padx=(0, 6))
+                self.jobs_close.pack_forget()
+                self._draw_progress(j.get("pct", 0), AC)
             else:
                 last = list(jobs.values())[-1]
-                if last["status"] == "pronto":
+                st = last["status"]
+                if st == "pronto":
                     self.jobs_lbl.config(
                         text=f"{last['label']} · pronto · "
-                             f"{last.get('size',0)/1048576:.1f} MB → {CFG.output}", fg=OK)
+                             f"{last.get('size', 0) / 1048576:.1f} MB  →  "
+                             f"{last.get('out', CFG.output)}", fg=OK)
+                    self._draw_progress(100, OK)
+                elif st == "cancelado":
+                    self.jobs_lbl.config(text=f"{last['label']} · cancelado · "
+                                              f"arquivo parcial removido", fg=WARN)
+                    self._draw_progress(0, WARN)
                 else:
                     self.jobs_lbl.config(text=f"{last['label']} · erro: "
-                                              f"{last.get('error','')}", fg=ERR)
+                                              f"{last.get('error', '')}", fg=ERR)
+                    self._draw_progress(100, ERR)
+                self.jobs_cancel.pack_forget()
+                self.jobs_close.pack(side="left")
             self.jobs_frame.pack(fill="x", side="bottom")
         self.root.after(400, self._tick)
 
