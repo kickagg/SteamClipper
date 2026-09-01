@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SteamClipper</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#161b22; --panel2:#1c232c; --line:#252d38;
+    --tx:#e6edf3; --tx2:#9aa7b4; --tx3:#6b7885;
+    --ac:#4a9eff; --ac2:#2b7fd4; --ok:#3fb950; --warn:#d29922; --err:#f85149;
+    --r:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--tx);
+    font:14px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  button{font:inherit;color:inherit;cursor:pointer;border:0;background:none}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#2c3542;border-radius:6px}
+  ::-webkit-scrollbar-thumb:hover{background:#3a4756}
+
+  header{display:flex;align-items:center;gap:14px;padding:12px 18px;
+    border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+  header h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  header h1 span{color:var(--ac)}
+  .grow{flex:1}
+  .btn{padding:7px 14px;border-radius:8px;background:var(--panel2);
+    border:1px solid var(--line);font-size:13px;transition:.12s;white-space:nowrap}
+  .btn:hover{background:#232c37;border-color:#313d4c}
+  .btn.p{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600}
+  .btn.p:hover{background:var(--ac2)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.sm{padding:5px 10px;font-size:12px}
+
+  main{flex:1;display:flex;min-height:0}
+
+  aside{width:320px;flex:0 0 auto;border-right:1px solid var(--line);
+    background:var(--panel);display:flex;flex-direction:column;min-height:0}
+  .asideHead{padding:12px 14px 8px;font-size:11px;font-weight:700;
+    letter-spacing:.9px;text-transform:uppercase;color:var(--tx3)}
+  .list{overflow-y:auto;padding:0 10px 12px;flex:1}
+  .card{display:flex;gap:11px;padding:9px;border-radius:var(--r);cursor:pointer;
+    border:1px solid transparent;margin-bottom:5px;transition:.12s}
+  .card:hover{background:var(--panel2)}
+  .card.sel{background:#1a2836;border-color:var(--ac)}
+  .card img{width:84px;height:47px;object-fit:cover;border-radius:6px;
+    flex:0 0 auto;background:#0a0d11}
+  .card .nm{font-weight:600;font-size:13px;margin-bottom:2px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card .mt{font-size:11.5px;color:var(--tx2);display:flex;gap:7px;flex-wrap:wrap}
+  .tag{font-size:10px;padding:1px 6px;border-radius:4px;background:#3a2f14;
+    color:var(--warn);font-weight:600}
+
+  section{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+  .empty{flex:1;display:grid;place-items:center;color:var(--tx3);
+    text-align:center;padding:40px;line-height:1.7}
+  .edHead{padding:14px 22px 10px;border-bottom:1px solid var(--line);flex:0 0 auto}
+  .edHead h2{margin:0 0 3px;font-size:17px;font-weight:600}
+  .edHead .sub{font-size:12.5px;color:var(--tx2)}
+  .edBody{flex:1;overflow-y:auto;padding:16px 22px 24px;min-height:0}
+
+  /* ---------- player (mpv em janela propria) ---------- */
+  .stage{position:relative;background:#07090c;border-radius:var(--r);
+    border:1px solid var(--line);overflow:hidden;margin-bottom:10px}
+  .stage .poster{display:block;width:100%;aspect-ratio:16/9;max-height:46vh;
+    object-fit:contain;background:#07090c}
+  .mpvOverlay{position:absolute;inset:0;display:grid;place-items:center;
+    text-align:center;background:rgba(7,9,12,.72);backdrop-filter:blur(2px)}
+  .mpvOverlay.hide{display:none}
+  .mpvOn{position:absolute;left:10px;top:10px;display:none;align-items:center;
+    gap:8px;background:rgba(7,9,12,.78);border:1px solid var(--line);
+    padding:6px 12px;border-radius:20px;font-size:12px;color:var(--tx2)}
+  .mpvOn.show{display:flex}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
+    animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  .ctrl{display:flex;align-items:center;gap:10px;padding:8px 10px;
+    background:var(--panel2);border-top:1px solid var(--line)}
+  .ico{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;
+    font-size:15px;background:#232c37;transition:.12s;flex:0 0 auto}
+  .ico:hover{background:#2c3744}
+  .ico.on{background:var(--ac);color:#fff}
+  .tcode{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--tx2);
+    min-width:118px}
+  .tcode b{color:var(--tx);font-weight:600}
+  input[type=range]{accent-color:var(--ac);width:82px}
+  select.mini{background:#232c37;border:1px solid var(--line);color:var(--tx);
+    padding:5px 7px;border-radius:7px;font:inherit;font-size:12px}
+
+  /* ---------- timeline ---------- */
+  .tlWrap{margin-bottom:6px}
+  .tl{position:relative;height:54px;border-radius:8px;overflow:hidden;
+    border:1px solid var(--line);cursor:pointer;user-select:none;background:#0a0d11}
+  .tlStrip{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;
+    pointer-events:none;opacity:.5}
+  .tlSel{position:absolute;top:0;bottom:0;background:rgba(74,158,255,.22);
+    border-left:2px solid var(--ac);border-right:2px solid var(--ac);pointer-events:none}
+  .tlPlay{position:absolute;top:0;bottom:0;width:2px;background:#fff;
+    pointer-events:none;box-shadow:0 0 7px rgba(255,255,255,.75)}
+  .tlHov{position:absolute;top:0;bottom:0;width:1px;background:rgba(255,255,255,.35);
+    pointer-events:none;display:none}
+  .tlMk{position:absolute;top:0;width:2px;height:9px;background:var(--warn);
+    pointer-events:none}
+  .tlLabels{display:flex;justify-content:space-between;font-size:11px;
+    color:var(--tx3);margin-top:5px;font-variant-numeric:tabular-nums}
+  .hint{font-size:12px;color:var(--tx3);margin:-1px 0 14px}
+
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .fld{display:flex;flex-direction:column;gap:4px}
+  .fld label{font-size:10.5px;font-weight:700;letter-spacing:.7px;
+    text-transform:uppercase;color:var(--tx3)}
+  input[type=text],select{background:var(--panel2);border:1px solid var(--line);
+    color:var(--tx);padding:7px 10px;border-radius:7px;font:inherit;font-size:13px}
+  input[type=text]{font-variant-numeric:tabular-nums}
+  input:focus,select:focus{outline:0;border-color:var(--ac)}
+  .w90{width:92px} .w150{width:150px} .grow2{flex:1;min-width:170px}
+
+  .presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    gap:9px;margin-bottom:14px}
+  .pr{text-align:left;padding:11px 13px;border-radius:var(--r);
+    background:var(--panel2);border:1px solid var(--line);transition:.12s}
+  .pr:hover{border-color:#3a4756}
+  .pr.sel{border-color:var(--ac);background:#16222e}
+  .pr b{display:block;font-size:13.5px;margin-bottom:3px}
+  .pr small{color:var(--tx2);font-size:11.5px;line-height:1.45;display:block}
+
+  .jobs{border-top:1px solid var(--line);background:var(--panel);
+    max-height:170px;overflow-y:auto;flex:0 0 auto}
+  .jobs.hide{display:none}
+  .job{display:flex;align-items:center;gap:12px;padding:9px 22px;
+    border-bottom:1px solid #1d242e;font-size:12.5px}
+  .job:last-child{border-bottom:0}
+  .job .jn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bar{width:130px;height:5px;border-radius:3px;background:#232c37;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--ac);transition:width .3s}
+  .st{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+    min-width:88px;text-align:right}
+  .st.ok{color:var(--ok)} .st.er{color:var(--err)} .st.go{color:var(--ac)}
+  .err{background:#2d1416;border:1px solid #5c2427;color:#ffb4ae;padding:9px 12px;
+    border-radius:8px;font-size:12.5px;margin-bottom:12px}
+  kbd{background:#232c37;border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:4px;padding:0 5px;font:600 11px/1.6 inherit}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Steam<span>Clipper</span></h1>
+  <div class="grow"></div>
+  <button class="btn" id="bReload">Recarregar</button>
+  <button class="btn" id="bFolder">Abrir pasta de saída</button>
+</header>
+
+<main>
+  <aside>
+    <div class="asideHead">Gravações</div>
+    <div class="list" id="list"></div>
+  </aside>
+  <section id="ed">
+    <div class="empty">Selecione uma gravação à esquerda.<br>
+      <small>As sessões são lidas direto da pasta do Steam.</small></div>
+  </section>
+</main>
+
+<div class="jobs hide" id="jobs"></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+let SESS = [], CUR = null, PRESET = "deliver", IN = 0, OUT = 0, MPVOK = false;
+let POS = 0, PLAYING = false, MPVON = false, poller = null;
+
+const fmt = s => {
+  s = Math.max(0, Math.round(s));
+  const h = s/3600|0, m = (s%3600)/60|0, x = s%60;
+  return (h ? h+":"+String(m).padStart(2,"0") : m)+":"+String(x).padStart(2,"0");
+};
+const parseT = v => {
+  const p = String(v).trim().split(":").map(Number);
+  if (p.some(isNaN)) return null;
+  return p.length===3 ? p[0]*3600+p[1]*60+p[2] : p.length===2 ? p[0]*60+p[1] : p[0];
+};
+const gb = b => (b/1073741824).toFixed(2)+" GB";
+const thumb = (id,t) => `/api/thumb?session=${encodeURIComponent(id)}&t=${Math.floor(t)}`;
+const esc = t => { const d=document.createElement("div"); d.textContent=t; return d.innerHTML; };
+
+// posicao atual = a que o mpv reporta
+const now = () => POS;
+const mpv = (action, value) => fetch("/api/mpv/cmd", {method:"POST",
+  headers:{"Content-Type":"application/json"}, body:JSON.stringify({action, value})}).then(r=>r.json());
+
+async function load(){
+  const r = await fetch("/api/sessions").then(r=>r.json());
+  SESS = r.sessions; MPVOK = r.mpv;
+  const L = $("#list"); L.innerHTML = "";
+  if(!SESS.length){ L.innerHTML='<div style="padding:20px;color:var(--tx3)">Nenhuma gravação encontrada.</div>'; return; }
+  SESS.slice().reverse().forEach(s=>{
+    const d = document.createElement("div");
+    d.className = "card"+(CUR && CUR.id===s.id ? " sel" : "");
+    d.dataset.id = s.id;
+    d.innerHTML = `<img loading="lazy" src="${thumb(s.id,s.seconds/2)}" alt="">
+      <div style="min-width:0;flex:1">
+        <div class="nm">${esc(s.game)}</div>
+        <div class="mt"><span>${s.started_h}</span><span>${fmt(s.seconds)}</span>
+          ${s.pruned?`<span class="tag" title="O buffer circular apagou o início">-${s.pruned_min} min</span>`:""}</div>
+        <div class="mt" style="color:var(--tx3)">${s.width}×${s.height} · ${gb(s.bytes)}</div>
+      </div>`;
+    d.onclick = () => pick(s);
+    L.appendChild(d);
+  });
+}
+
+function pick(s){
+  CUR = s; IN = 0; OUT = Math.min(90, s.seconds); POS = 0; MPVON = false;
+  document.querySelectorAll(".card").forEach(c=>c.classList.toggle("sel", c.dataset.id===s.id));
+  render();
+}
+
+function render(){
+  const s = CUR;
+
+  $("#ed").innerHTML = `
+    <div class="edHead">
+      <h2>${esc(s.game)}</h2>
+      <div class="sub">${s.started_h} · ${fmt(s.seconds)} disponíveis · ${s.width}×${s.height} · ${gb(s.bytes)} (${s.gb_h} GB/h)
+        ${s.pruned?` · <span style="color:var(--warn)">o buffer apagou os primeiros ${s.pruned_min} min</span>`:""}</div>
+    </div>
+    <div class="edBody">
+      ${!s.has_audio?'<div class="err">Esta sessão não tem faixa de áudio.</div>':""}
+
+      <div class="stage" id="stage">
+        <img class="poster" id="poster" src="${thumb(s.id,0)}" alt="">
+        <div class="mpvOverlay" id="mpvOff">
+          <div>
+            <button class="btn p" id="bOpen">Abrir no mpv</button>
+            <div style="margin-top:9px;color:var(--tx3);font-size:12px">
+              1440p original, sem recompressão · o painel controla a reprodução
+            </div>
+          </div>
+        </div>
+        <div class="mpvOn" id="mpvOn">
+          <div class="dot"></div> tocando no mpv — esta janela é o controle
+        </div>
+        <div class="ctrl">
+          <button class="ico" id="bPlay" title="Reproduzir / pausar  (espaço)">▶</button>
+          <div class="tcode"><b id="tNow">0:00</b> / ${fmt(s.seconds)}</div>
+          <button class="ico" id="bBack" title="Voltar 5s  (←)">⏪</button>
+          <button class="ico" id="bFwd" title="Avançar 5s  (→)">⏩</button>
+          <select class="mini" id="selSpeed" title="Velocidade">
+            <option value="0.25">0,25×</option>
+            <option value="0.5">0,5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
+          <div class="grow"></div>
+          <button class="btn sm" id="bMarkIn" title="Marcar início na posição atual  (i)">[ Início</button>
+          <button class="btn sm" id="bMarkOut" title="Marcar fim na posição atual  (o)">Fim ]</button>
+        </div>
+      </div>
+
+      <div class="tlWrap">
+        <div class="tl" id="tl">
+          <img class="tlStrip" src="/api/strip?session=${encodeURIComponent(s.id)}&n=16" alt="">
+          <div class="tlSel" id="tlSel"></div>
+          <div class="tlHov" id="tlHov"></div>
+          <div class="tlPlay" id="tlPlay" style="left:0"></div>
+          ${s.markers.map(m=>`<div class="tlMk" style="left:${m.t/s.seconds*100}%" title="${m.type}"></div>`).join("")}
+        </div>
+        <div class="tlLabels"><span>0:00</span><span>${fmt(s.seconds)}</span></div>
+      </div>
+      <div class="hint">Clique na linha do tempo para pular · arraste para marcar o trecho ·
+        <kbd>espaço</kbd> play · <kbd>i</kbd>/<kbd>o</kbd> marcam início e fim · <kbd>←</kbd><kbd>→</kbd> 5s.
+        A janela do mpv aceita os atalhos dele (<kbd>f</kbd> tela cheia, <kbd>,</kbd>/<kbd>.</kbd> quadro a quadro).</div>
+
+      <div class="row">
+        <div class="fld"><label>Início</label><input type="text" id="fIn" class="w90"></div>
+        <div class="fld"><label>Fim</label><input type="text" id="fOut" class="w90"></div>
+        <div class="fld"><label>Duração</label><input type="text" id="fDur" class="w90" disabled></div>
+        <div class="fld"><label>Nome do arquivo</label><input type="text" id="fName" class="grow2" value="${esc(sug(s))}"></div>
+        <div class="fld"><label>Qualidade da exportação</label>
+          <select id="fQ" class="w150">
+            <option value="15">Máxima (cq 15)</option>
+            <option value="19" selected>Alta (cq 19)</option>
+            <option value="23">Média (cq 23)</option>
+          </select></div>
+      </div>
+
+      <div class="presets">
+        ${pr("deliver","Entrega","H.264 60 fps constante. Abre em qualquer player e importa limpo no Premiere e no After Effects.")}
+        ${pr("raw","Original","Cópia do HEVC sem reprocessar. Instantâneo e sem perda — mas mantém o framerate variável, evite no Premiere.")}
+        ${pr("edit","Edição","DNxHR HQ para grading pesado e After Effects. Cerca de 5,6 GB por minuto.")}
+      </div>
+
+      <div class="row">
+        <button class="btn p" id="bExp">Exportar trecho</button>
+        <button class="btn" id="bClose">Fechar player</button>
+        ${MPVOK?"":'<span style="color:var(--err);font-size:12px">libmpv não encontrada — instale o mpv.net</span>'}
+      </div>
+    </div>`;
+  wire(); sync();
+}
+
+const pr = (id,t,d) => `<button class="pr ${PRESET===id?"sel":""}" data-p="${id}"><b>${t}</b><small>${d}</small></button>`;
+function sug(s){
+  const d = s.started_h.replace(/[\/:]/g,"-").replace(" ","_");
+  return `${s.game.replace(/[<>:"/\\|?*™®]/g,"").trim()} ${d}`;
+}
+
+// ---------- player (mpv) ----------
+async function openMpv(t){
+  $("#mpvOff").classList.add("hide");
+  const r = await fetch("/api/mpv/open", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:CUR.id, t})}).then(r=>r.json());
+  if(r.error){ alert(r.error); $("#mpvOff").classList.remove("hide"); return; }
+  MPVON = true; $("#mpvOn").classList.add("show");
+  startPoll();
+}
+
+// Uma requisicao leve por 400ms mantem o cursor da timeline em dia. Se o mpv
+// tiver sido fechado, o proprio state avisa e a UI volta ao estado inicial.
+function startPoll(){
+  clearInterval(poller);
+  poller = setInterval(async ()=>{
+    let st; try{ st = await fetch("/api/mpv/state").then(r=>r.json()); }catch{ return; }
+    if(!st.open){ MPVON=false; clearInterval(poller);
+      $("#mpvOn")?.classList.remove("show"); $("#mpvOff")?.classList.remove("hide"); return; }
+    POS = st.pos; PLAYING = !st.paused;
+    const b=$("#bPlay"); if(b) b.textContent = st.paused ? "▶" : "⏸";
+    paint();
+  }, 400);
+}
+
+function paint(){
+  if(!CUR) return;
+  const p = $("#tlPlay"); if(p) p.style.left = (POS/CUR.seconds*100)+"%";
+  const n = $("#tNow");   if(n) n.textContent = fmt(POS);
+}
+
+function seekTo(t, autoOpen){
+  POS = Math.max(0, Math.min(CUR.seconds-0.5, t));
+  paint();
+  if(MPVON) mpv("seek", POS);
+  else if(autoOpen) openMpv(POS);
+  else { const ps=$("#poster"); if(ps) ps.src = thumb(CUR.id, POS); }
+}
+
+function wire(){
+  const s = CUR, tl = $("#tl");
+
+  $("#bOpen").onclick  = () => openMpv(IN);
+  $("#bPlay").onclick  = () => MPVON ? mpv("toggle") : openMpv(POS);
+  $("#bBack").onclick  = () => seekTo(POS-5, false);
+  $("#bFwd").onclick   = () => seekTo(POS+5, false);
+  $("#selSpeed").onchange = e => { if(MPVON) mpv("speed", +e.target.value); };
+
+  $("#bMarkIn").onclick  = () => { IN = POS; if(OUT <= IN) OUT = Math.min(s.seconds, IN+30); sync(); };
+  $("#bMarkOut").onclick = () => { OUT = Math.max(IN+1, POS); sync(); };
+
+  // clique = pular para o ponto; arrastar = marcar o trecho
+  const pos = e => { const r = tl.getBoundingClientRect();
+    return Math.max(0, Math.min(1,(e.clientX-r.left)/r.width))*s.seconds; };
+  let down = null, moved = false;
+  tl.addEventListener("pointerdown", e => { down = pos(e); moved=false; tl.setPointerCapture(e.pointerId); });
+  tl.addEventListener("pointermove", e => {
+    const t = pos(e);
+    const h = $("#tlHov"); h.style.display="block"; h.style.left=(t/s.seconds*100)+"%";
+    if(down === null) return;
+    if(Math.abs(t-down) > s.seconds*0.004) moved = true;
+    if(moved){ IN = Math.min(down,t); OUT = Math.max(down,t); sync(); }
+  });
+  tl.addEventListener("pointerup", e => {
+    if(down !== null && !moved) seekTo(pos(e), true);
+    down = null;
+  });
+  tl.addEventListener("pointerleave", ()=> { $("#tlHov").style.display="none"; });
+
+  const commit = () => {
+    const a = parseT($("#fIn").value), b = parseT($("#fOut").value);
+    if(a!==null) IN = Math.max(0, Math.min(s.seconds, a));
+    if(b!==null) OUT = Math.max(IN+1, Math.min(s.seconds, b));
+    sync();
+  };
+  $("#fIn").onchange = $("#fOut").onchange = commit;
+
+  document.querySelectorAll(".pr").forEach(b => b.onclick = () => {
+    PRESET = b.dataset.p;
+    document.querySelectorAll(".pr").forEach(x=>x.classList.remove("sel"));
+    b.classList.add("sel");
+  });
+  $("#bExp").onclick = doExport;
+  $("#bClose").onclick = async () => {
+    await mpv("close"); MPVON=false; clearInterval(poller);
+    $("#mpvOn").classList.remove("show"); $("#mpvOff").classList.remove("hide");
+  };
+  if(!MPVOK) $("#bOpen").disabled = true;
+  if(MPVON){ $("#mpvOff").classList.add("hide"); $("#mpvOn").classList.add("show"); }
+}
+
+document.addEventListener("keydown", e => {
+  if(!CUR || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if(e.code === "Space"){ e.preventDefault(); $("#bPlay")?.click(); }
+  else if(k === "i"){ $("#bMarkIn")?.click(); }
+  else if(k === "o"){ $("#bMarkOut")?.click(); }
+  else if(e.key === "ArrowLeft"){  e.preventDefault(); seekTo(POS-5, false); }
+  else if(e.key === "ArrowRight"){ e.preventDefault(); seekTo(POS+5, false); }
+});
+
+function sync(){
+  const s = CUR;
+  $("#fIn").value = fmt(IN); $("#fOut").value = fmt(OUT); $("#fDur").value = fmt(OUT-IN);
+  const sel = $("#tlSel");
+  sel.style.left = (IN/s.seconds*100)+"%";
+  sel.style.width = ((OUT-IN)/s.seconds*100)+"%";
+}
+
+async function doExport(){
+  const r = await fetch("/api/export",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:CUR.id,preset:PRESET,start:IN,
+      duration:Math.max(.5,OUT-IN),quality:+$("#fQ").value,
+      name:$("#fName").value.trim()||CUR.game})}).then(r=>r.json());
+  if(r.error) alert("Erro: "+r.error);
+  poll();
+}
+
+async function poll(){
+  const {jobs} = await fetch("/api/jobs").then(r=>r.json());
+  const list = Object.values(jobs), box = $("#jobs");
+  box.classList.toggle("hide", !list.length);
+  box.innerHTML = list.reverse().map(j=>{
+    const cls = j.status==="pronto"?"ok":j.status==="erro"?"er":"go";
+    const txt = j.status==="pronto" ? `pronto · ${(j.size/1048576).toFixed(1)} MB`
+              : j.status==="erro" ? "erro" : j.status;
+    return `<div class="job">
+      <div class="jn">${esc(j.label||j.session)} <span style="color:var(--tx3)">· ${j.preset}</span></div>
+      <div class="bar"><i style="width:${j.pct||0}%"></i></div>
+      <div class="st ${cls}" title="${esc(j.error||"")}">${txt}</div></div>`;
+  }).join("");
+  if(list.some(j=>j.status!=="pronto"&&j.status!=="erro")) setTimeout(poll,700);
+}
+
+$("#bReload").onclick = load;
+$("#bFolder").onclick = () => fetch("/api/reveal",{method:"POST"});
+load();
+</script>
+</body>
+</html>

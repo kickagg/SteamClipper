@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# cache de miniaturas (fica em %LOCALAPPDATA%, mas por garantia)
+thumbs/
+*.jpg
+*.png
+
+# saidas de teste
+*.mp4
+*.mov
+*.mkv
+
+# editores / SO
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
