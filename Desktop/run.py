@@ -25,7 +25,7 @@ from tkinter import messagebox
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from steamclipper import Config, Jobs, Mpv, PRESETS, scan_sessions, strip, thumb, virtual  # noqa: E402
+from steamclipper import Config, Jobs, Mpv, PRESETS, scan_sessions, thumb, virtual  # noqa: E402
 from steamclipper.steam import chunk_list                                          # noqa: E402
 
 CFG = Config()
@@ -35,6 +35,9 @@ PORT = Config.PORT + 1          # nao briga com a versao Browser
 BG, PANEL, PANEL2 = "#0f1216", "#161b22", "#1c232c"
 LINE, TX, TX2, TX3 = "#252d38", "#e6edf3", "#9aa7b4", "#6b7885"
 AC, OK, WARN, ERR = "#4a9eff", "#3fb950", "#d29922", "#f85149"
+
+TILE_H = 56                       # altura da faixa da linha do tempo
+TILE_W = round(TILE_H * 16 / 9)   # 16:9, para o quadro nao distorcer
 
 
 # --------------------------------------------------- servidor so para o mpv
@@ -129,6 +132,40 @@ def gb(b: int) -> str:
     return f"{b / 1073741824:.2f} GB"
 
 
+class Tooltip:
+    """Balao de ajuda simples - o tk nao traz nada parecido de fabrica."""
+
+    def __init__(self, widget, text, delay=450):
+        self.w, self.text, self.delay = widget, text, delay
+        self.tip = None
+        self.job = None
+        widget.bind("<Enter>", self._enter, add="+")
+        widget.bind("<Leave>", self._leave, add="+")
+        widget.bind("<ButtonPress>", self._leave, add="+")
+
+    def _enter(self, _e=None):
+        self.job = self.w.after(self.delay, self._show)
+
+    def _leave(self, _e=None):
+        if self.job:
+            self.w.after_cancel(self.job); self.job = None
+        if self.tip:
+            self.tip.destroy(); self.tip = None
+
+    def _show(self):
+        if self.tip:
+            return
+        x = self.w.winfo_rootx() + self.w.winfo_width() // 2
+        y = self.w.winfo_rooty() - 6
+        self.tip = tw = tk.Toplevel(self.w)
+        tw.wm_overrideredirect(True)
+        tw.configure(bg=LINE)
+        tk.Label(tw, text=self.text, bg="#0b0e12", fg=TX, padx=9, pady=5,
+                 font=("Segoe UI", 9), justify="left").pack(padx=1, pady=1)
+        tw.update_idletasks()
+        tw.wm_geometry(f"+{x - tw.winfo_width() // 2}+{y - tw.winfo_height()}")
+
+
 class Flat(tk.Label):
     """Botao chato o suficiente para combinar com o resto (tk.Button e feio no Win)."""
 
@@ -159,7 +196,10 @@ class App:
         self.inp, self.out = 0.0, 90.0
         self.pos = 0.0
         self.thumbs = {}          # tkinter descarta PhotoImage sem referencia viva
-        self.strip_img = {}
+        self.tiles = {}           # quadros da linha do tempo
+        self._tile_times = []
+        self._tl_job = None
+        self._fs = None           # janela de tela cheia do player
         self.mpv = Mpv(CFG.libmpv)
         self.cards = []
 
@@ -175,7 +215,12 @@ class App:
         self.fm = tkfont.Font(family="Consolas", size=10)
 
         self._header()
-        body = tk.Frame(root, bg=BG); body.pack(fill="both", expand=True)
+        # PanedWindow no lugar de frames fixos: as divisorias viram alcas que o
+        # usuario arrasta para dar mais espaco a lista ou ao video.
+        body = tk.PanedWindow(root, orient="horizontal", bg=LINE, bd=0,
+                              sashwidth=6, sashrelief="flat",
+                              handlesize=0, opaqueresize=False)
+        body.pack(fill="both", expand=True)
         self._sidebar(body)
         self._main(body)
         self._jobs_bar()
@@ -184,6 +229,7 @@ class App:
         root.bind("<space>", lambda e: self.toggle())
         root.bind("i", lambda e: self.mark_in())
         root.bind("o", lambda e: self.mark_out())
+        root.bind("f", lambda e: self.fullscreen())
         root.bind("<Left>", lambda e: self.seek(self.pos - 5))
         root.bind("<Right>", lambda e: self.seek(self.pos + 5))
 
@@ -200,29 +246,49 @@ class App:
         Flat(h, "Abrir pasta de saída", self.reveal, font=self.fs).pack(side="right", padx=(0, 16))
         Flat(h, "Recarregar", self.reload, font=self.fs).pack(side="right", padx=8)
 
-    def _sidebar(self, body):
-        sb = tk.Frame(body, bg=PANEL, width=310); sb.pack(side="left", fill="y")
-        sb.pack_propagate(False)
+    def _sidebar(self, paned):
+        sb = tk.Frame(paned, bg=PANEL)
+        paned.add(sb, minsize=210, width=310, stretch="never")
         tk.Label(sb, text="GRAVAÇÕES", bg=PANEL, fg=TX3, font=self.fs,
                  anchor="w").pack(fill="x", padx=14, pady=(12, 6))
 
         wrap = tk.Frame(sb, bg=PANEL); wrap.pack(fill="both", expand=True)
         cv = tk.Canvas(wrap, bg=PANEL, highlightthickness=0, bd=0)
-        sc = tk.Scrollbar(wrap, orient="vertical", command=cv.yview)
-        cv.configure(yscrollcommand=sc.set)
+        self.list_sb = tk.Scrollbar(wrap, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=self.list_sb.set)
         cv.pack(side="left", fill="both", expand=True)
-        sc.pack(side="right", fill="y")
+        self.list_cv = cv
 
         self.list_frame = tk.Frame(cv, bg=PANEL)
         win = cv.create_window((0, 0), window=self.list_frame, anchor="nw")
 
         # O frame interno precisa acompanhar a largura do canvas; sem isto ele
         # nasce com 1px e os cards ficam invisiveis.
-        cv.bind("<Configure>", lambda e: cv.itemconfigure(win, width=e.width))
-        self.list_frame.bind("<Configure>",
-                             lambda e: cv.configure(scrollregion=cv.bbox("all")))
-        cv.bind_all("<MouseWheel>", lambda e: cv.yview_scroll(-e.delta // 120, "units"))
+        cv.bind("<Configure>", lambda e: (cv.itemconfigure(win, width=e.width),
+                                          self._sync_scroll()))
+        self.list_frame.bind("<Configure>", lambda e: self._sync_scroll())
+
+        # Roda so quando o ponteiro esta sobre a lista E ha o que rolar - antes o
+        # bind_all capturava a roda da janela inteira e rolava mesmo com 1 card.
+        cv.bind("<Enter>", lambda e: cv.bind_all("<MouseWheel>", self._wheel))
+        cv.bind("<Leave>", lambda e: cv.unbind_all("<MouseWheel>"))
         self._fill_list()
+
+    def _sync_scroll(self):
+        """Some com a barra e desliga a roda quando tudo cabe na tela."""
+        cv = self.list_cv
+        cv.configure(scrollregion=cv.bbox("all"))
+        need = self.list_frame.winfo_reqheight() > cv.winfo_height()
+        if need and not self.list_sb.winfo_ismapped():
+            self.list_sb.pack(side="right", fill="y")
+        elif not need and self.list_sb.winfo_ismapped():
+            self.list_sb.pack_forget()
+            cv.yview_moveto(0)
+
+    def _wheel(self, e):
+        cv = self.list_cv
+        if self.list_frame.winfo_reqheight() > cv.winfo_height():
+            cv.yview_scroll(-e.delta // 120, "units")
 
     def _fill_list(self):
         for w in self.list_frame.winfo_children():
@@ -271,59 +337,130 @@ class App:
             self.root.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
-    def _main(self, body):
-        mn = tk.Frame(body, bg=BG); mn.pack(side="left", fill="both", expand=True)
+    def _main(self, paned):
+        # Divisoria vertical: o usuario decide quanto espaco o video toma em
+        # relacao aos controles e presets.
+        mn = tk.PanedWindow(paned, orient="vertical", bg=LINE, bd=0,
+                            sashwidth=6, sashrelief="flat", handlesize=0,
+                            opaqueresize=False)
+        paned.add(mn, minsize=520, stretch="always")
 
-        self.title_lbl = tk.Label(mn, text="", bg=BG, fg=TX, font=self.fh, anchor="w")
-        self.title_lbl.pack(fill="x", padx=20, pady=(14, 0))
-        self.sub_lbl = tk.Label(mn, text="", bg=BG, fg=TX2, font=self.fs, anchor="w")
-        self.sub_lbl.pack(fill="x", padx=20, pady=(2, 10))
+        top = tk.Frame(mn, bg=BG)
+        mn.add(top, minsize=220, height=520, stretch="always")
+
+        self.title_lbl = tk.Label(top, text="", bg=BG, fg=TX, font=self.fh, anchor="w")
+        self.title_lbl.pack(fill="x", padx=20, pady=(12, 0))
+        self.sub_lbl = tk.Label(top, text="", bg=BG, fg=TX2, font=self.fs, anchor="w")
+        self.sub_lbl.pack(fill="x", padx=20, pady=(2, 8))
 
         # O mpv desenha numa janela filha nativa: ela fica ACIMA de qualquer widget
-        # tk na mesma area. Por isso o video tem a faixa dele e os controles ficam
-        # fora, nunca por cima.
-        self.video = tk.Frame(mn, bg="#07090c", height=430)
-        self.video.pack(fill="both", expand=True, padx=20)
-        self.video.pack_propagate(False)
-        self.video_hint = tk.Label(self.video, text="Selecione uma gravação",
+        # tk na mesma area. Por isso os controles ficam fora, nunca por cima.
+        # O wrap ocupa o espaco livre e o frame do video e centralizado nele com a
+        # proporcao da gravacao, para nao esticar a imagem.
+        self.video_wrap = tk.Frame(top, bg="#07090c")
+        self.video_wrap.pack(fill="both", expand=True, padx=20)
+        self.video = tk.Frame(self.video_wrap, bg="#07090c")
+        self.video.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.video_wrap.bind("<Configure>", lambda e: self._fit_video())
+        self.video_hint = tk.Label(self.video_wrap, text="Selecione uma gravação",
                                    bg="#07090c", fg=TX3, font=self.f)
         self.video_hint.place(relx=.5, rely=.5, anchor="center")
 
-        ct = tk.Frame(mn, bg=PANEL2, height=48); ct.pack(fill="x", padx=20)
+        bot = tk.Frame(mn, bg=BG)
+        mn.add(bot, minsize=250, stretch="never")
+        self._controls(bot)
+        self._timeline(bot)
+        self._fields(bot)
+
+    def _controls(self, parent):
+        ct = tk.Frame(parent, bg=PANEL2, height=48)
+        ct.pack(fill="x", padx=20, pady=(8, 0))
         ct.pack_propagate(False)
-        self.play_btn = Flat(ct, "▶", self.toggle, pad=(14, 7), font=self.f)
-        self.play_btn.pack(side="left", padx=(8, 10), pady=6)
-        self.time_lbl = tk.Label(ct, text="0:00 / 0:00", bg=PANEL2, fg=TX, font=self.fm)
-        self.time_lbl.pack(side="left")
-        Flat(ct, "⏪", lambda: self.seek(self.pos - 5), pad=(10, 7), font=self.f).pack(side="left", padx=6)
-        Flat(ct, "⏩", lambda: self.seek(self.pos + 5), pad=(10, 7), font=self.f).pack(side="left")
+
+        # Um frame centralizado: os controles de transporte ficam no meio, como
+        # em qualquer player, em vez de empilhados a esquerda.
+        mid = tk.Frame(ct, bg=PANEL2)
+        mid.place(relx=.5, rely=.5, anchor="center")
+
+        def ico(txt, cmd, tip, w=(11, 7)):
+            b = Flat(mid, txt, cmd, pad=w, font=self.f)
+            b.pack(side="left", padx=3)
+            Tooltip(b, tip)
+            return b
+
+        ico("⏮", lambda: self.seek(self.inp), "Ir para o início marcado")
+        ico("⏪", lambda: self.seek(self.pos - 10), "Voltar 10s")
+        ico("◀", lambda: self.seek(self.pos - 5), "Voltar 5s  (←)")
+        self.play_btn = ico("▶", self.toggle, "Reproduzir / pausar  (espaço)", (15, 7))
+        ico("▶", lambda: self.seek(self.pos + 5), "Avançar 5s  (→)")
+        ico("⏩", lambda: self.seek(self.pos + 10), "Avançar 10s")
+        ico("⏭", lambda: self.seek(self.out), "Ir para o fim marcado")
+
+        self.time_lbl = tk.Label(mid, text="0:00 / 0:00", bg=PANEL2, fg=TX, font=self.fm)
+        self.time_lbl.pack(side="left", padx=14)
+
+        b = Flat(mid, "[ Início", self.mark_in, font=self.fs)
+        b.pack(side="left", padx=(6, 3)); Tooltip(b, "Marca o início do trecho aqui  (i)")
+        b = Flat(mid, "Fim ]", self.mark_out, font=self.fs)
+        b.pack(side="left", padx=3); Tooltip(b, "Marca o fim do trecho aqui  (o)")
+
+        # velocidade e volume ficam a esquerda, fora do grupo de transporte
+        left = tk.Frame(ct, bg=PANEL2); left.place(x=8, rely=.5, anchor="w")
         self.speed = tk.StringVar(value="1")
-        sp = tk.OptionMenu(ct, self.speed, "0.25", "0.5", "1", "2", "4",
+        sp = tk.OptionMenu(left, self.speed, "0.25", "0.5", "1", "1.5", "2", "4",
                            command=lambda v: self.mpv.command("speed", v))
         sp.config(bg=PANEL2, fg=TX, font=self.fs, bd=0, highlightthickness=0,
-                  activebackground="#2c3744", width=4)
+                  activebackground="#2c3744", width=4, indicatoron=0)
         sp["menu"].config(bg=PANEL2, fg=TX, font=self.fs)
-        sp.pack(side="left", padx=10)
-        Flat(ct, "Fim ]", self.mark_out, font=self.fs).pack(side="right", padx=(4, 10))
-        Flat(ct, "[ Início", self.mark_in, font=self.fs).pack(side="right", padx=4)
+        sp.pack(side="left")
+        Tooltip(sp, "Velocidade de reprodução")
 
-        self.tl = tk.Canvas(mn, bg="#0a0d11", height=56, highlightthickness=1,
-                            highlightbackground=LINE, cursor="hand2")
+        self.vol = tk.Scale(left, from_=0, to=100, orient="horizontal", length=90,
+                            bg=PANEL2, fg=TX2, troughcolor="#232c37", bd=0,
+                            highlightthickness=0, sliderrelief="flat",
+                            showvalue=False, font=self.fs,
+                            command=lambda v: self.mpv.command("volume", v))
+        self.vol.set(100)
+        self.vol.pack(side="left", padx=(10, 0))
+        Tooltip(self.vol, "Volume")
+
+        right = tk.Frame(ct, bg=PANEL2); right.place(relx=1, x=-8, rely=.5, anchor="e")
+        b = Flat(right, "⛶", self.fullscreen, pad=(11, 7), font=self.f)
+        b.pack(side="right"); Tooltip(b, "Tela cheia  (f) — Esc para sair")
+
+    def _timeline(self, parent):
+        self.tl = tk.Canvas(parent, bg="#0a0d11", height=TILE_H + 2,
+                            highlightthickness=1, highlightbackground=LINE,
+                            cursor="hand2")
         self.tl.pack(fill="x", padx=20, pady=(10, 0))
         self.tl.bind("<Button-1>", self._tl_down)
         self.tl.bind("<B1-Motion>", self._tl_drag)
         self.tl.bind("<ButtonRelease-1>", self._tl_up)
-        self.tl.bind("<Configure>", lambda e: self._draw_tl())
-        self.lbl_row = tk.Frame(mn, bg=BG); self.lbl_row.pack(fill="x", padx=20)
-        self.t0_lbl = tk.Label(self.lbl_row, text="0:00", bg=BG, fg=TX3, font=self.fs)
-        self.t0_lbl.pack(side="left")
-        self.t1_lbl = tk.Label(self.lbl_row, text="", bg=BG, fg=TX3, font=self.fs)
-        self.t1_lbl.pack(side="right")
-        tk.Label(mn, text="Clique na linha do tempo para pular · arraste para marcar o trecho · "
-                          "espaço play · i / o marcam início e fim · ← → 5s",
-                 bg=BG, fg=TX3, font=self.fs, anchor="w").pack(fill="x", padx=20, pady=(6, 10))
+        self.tl.bind("<Configure>", self._tl_resize)
 
-        self._fields(mn)
+        row = tk.Frame(parent, bg=BG); row.pack(fill="x", padx=20)
+        self.t0_lbl = tk.Label(row, text="0:00", bg=BG, fg=TX3, font=self.fs)
+        self.t0_lbl.pack(side="left")
+        self.t1_lbl = tk.Label(row, text="", bg=BG, fg=TX3, font=self.fs)
+        self.t1_lbl.pack(side="right")
+        tk.Label(parent, text="Clique na linha do tempo para pular · arraste para marcar o trecho · "
+                              "espaço play · i / o marcam início e fim · ← → 5s",
+                 bg=BG, fg=TX3, font=self.fs, anchor="w").pack(fill="x", padx=20,
+                                                               pady=(6, 8))
+
+    def _fit_video(self):
+        """Encaixa o quadro do video no espaco livre mantendo a proporcao."""
+        w = self.video_wrap.winfo_width()
+        h = self.video_wrap.winfo_height()
+        if w < 20 or h < 20:
+            return
+        ar = 16 / 9
+        if self.cur and self.cur.get("width") and self.cur.get("height"):
+            ar = self.cur["width"] / self.cur["height"]
+        vw, vh = (int(h * ar), h) if w / h > ar else (w, int(w / ar))
+        self.video.place_configure(x=(w - vw) // 2, y=(h - vh) // 2,
+                                   width=vw, height=vh,
+                                   relx=0, rely=0, relwidth=0, relheight=0)
 
     def _fields(self, mn):
         row = tk.Frame(mn, bg=BG); row.pack(fill="x", padx=20)
@@ -341,6 +478,9 @@ class App:
             else:
                 e.bind("<Return>", lambda ev: self._commit())
                 e.bind("<FocusOut>", lambda ev: self._commit())
+            Tooltip(e, {"e_in": "Onde o trecho começa (mm:ss ou h:mm:ss)",
+                        "e_out": "Onde o trecho termina",
+                        "e_dur": "Duração do trecho — calculada"}[attr])
             setattr(self, attr, e)
 
         f = tk.Frame(row, bg=BG); f.pack(side="left", fill="x", expand=True, padx=(0, 12))
@@ -349,11 +489,16 @@ class App:
         self.e_name = tk.Entry(f, bg=PANEL2, fg=TX, font=self.f, bd=0,
                                insertbackground=TX)
         self.e_name.pack(fill="x", ipady=5)
+        Tooltip(self.e_name, "Nome do arquivo exportado.\nVai para: " + str(CFG.output))
 
         f = tk.Frame(row, bg=BG); f.pack(side="left")
         tk.Label(f, text="QUALIDADE", bg=BG, fg=TX3, font=self.fs, anchor="w").pack(fill="x")
         self.quality = tk.StringVar(value="19")
         q = tk.OptionMenu(f, self.quality, "15", "19", "23")
+        Tooltip(f, "Qualidade do vídeo no preset Entrega (CQ do NVENC).\n"
+                   "15 = máxima, arquivo maior · 19 = alta (padrão)\n"
+                   "23 = menor arquivo, perde detalhe em cena rápida.\n"
+                   "Ignorado em Original e Edição.")
         q.config(bg=PANEL2, fg=TX, font=self.fs, bd=0, highlightthickness=0,
                  activebackground="#2c3744", width=5)
         q["menu"].config(bg=PANEL2, fg=TX, font=self.fs)
@@ -373,6 +518,7 @@ class App:
                                                                      pady=(2, 10))
             for w in (b, *b.winfo_children()):
                 w.bind("<Button-1>", lambda e, k=key: self.set_preset(k))
+            Tooltip(b, meta["hint"])
             self.preset_btns[key] = b
 
         act = tk.Frame(mn, bg=BG); act.pack(fill="x", padx=20, pady=14)
@@ -410,32 +556,10 @@ class App:
         clean = re.sub(r'[<>:"/\\|?*™®]', "", s["game"]).strip()
         self.e_name.delete(0, "end"); self.e_name.insert(0, f"{clean} {stamp}")
         self.video_hint.config(text="Abrindo no player…")
-        self._sync(); self._draw_tl()
-        self._load_strip(s)
+        self._sync()
+        self._fit_video()
+        self._tl_resize()
         self.open_player(0)
-
-    def _load_strip(self, s):
-        """Faixa de quadros da linha do tempo, gerada fora da thread da UI."""
-        if s["id"] in self.strip_img:
-            return
-        def work():
-            try:
-                self.tl.update_idletasks()
-                w = max(400, self.tl.winfo_width())
-                p = strip(CFG, s["id"], 16, width=max(60, w // 16), fmt="png")
-            except Exception:                                  # noqa: BLE001
-                return
-            def apply():
-                try:
-                    img = tk.PhotoImage(file=str(p))
-                    fy = max(1, img.height() // 56)
-                    self.strip_img[s["id"]] = img.subsample(1, fy)
-                    if self.cur and self.cur["id"] == s["id"]:
-                        self._draw_tl()
-                except tk.TclError:
-                    pass
-            self.root.after(0, apply)
-        threading.Thread(target=work, daemon=True).start()
 
     def open_player(self, t):
         if not self.mpv.available:
@@ -444,7 +568,7 @@ class App:
         sid = self.cur["id"]
         has_audio = bool(chunk_list(CFG.video_dir / sid, 1))
         self.video.update_idletasks()
-        if self.mpv.h is None:
+        if self.mpv.h is None and self.mpv.wid is None:
             self.mpv.wid = self.video.winfo_id()
         def work():
             try:
@@ -455,6 +579,36 @@ class App:
             except Exception as e:                             # noqa: BLE001
                 self.root.after(0, lambda: self.video_hint.config(text=f"erro: {e}"))
         threading.Thread(target=work, daemon=True).start()
+
+    def fullscreen(self):
+        """Reparenta o mpv numa janela sem borda e devolve ao sair.
+
+        Trocar o "wid" de uma instancia viva nao e suportado, entao o player e
+        recriado na posicao atual - o seek e instantaneo, o corte e imperceptivel.
+        """
+        if self._fs:
+            pos = self.pos
+            self._fs.destroy(); self._fs = None
+            self.mpv.destroy()
+            self.mpv = Mpv(CFG.libmpv, wid=self.video.winfo_id())
+            self.open_player(pos)
+            return
+        if not self.cur or self.mpv.h is None:
+            return
+        pos = self.pos
+        self._fs = tw = tk.Toplevel(self.root)
+        tw.attributes("-fullscreen", True)
+        tw.configure(bg="black")
+        holder = tk.Frame(tw, bg="black")
+        holder.pack(fill="both", expand=True)
+        tw.update_idletasks()
+        tw.bind("<Escape>", lambda e: self.fullscreen())
+        tw.bind("f", lambda e: self.fullscreen())
+        tw.bind("<space>", lambda e: self.toggle())
+        tw.protocol("WM_DELETE_WINDOW", self.fullscreen)
+        self.mpv.destroy()
+        self.mpv = Mpv(CFG.libmpv, wid=holder.winfo_id())
+        self.open_player(pos)
 
     def close_player(self):
         self.mpv.destroy()
@@ -539,27 +693,88 @@ class App:
             self.seek(self._tl_pos(e))
         del self._down
 
+    def _tl_resize(self, _e=None):
+        """Redesenha ao redimensionar, com folga para nao gerar a cada pixel."""
+        if self._tl_job:
+            self.root.after_cancel(self._tl_job)
+        self._tl_job = self.root.after(180, lambda: (self._load_tiles(), self._draw_tl()))
+
+    def _load_tiles(self):
+        """Gera os quadros da linha do tempo no tamanho exato em que serao usados.
+
+        A versao anterior montava uma faixa unica e a esticava; como a largura era
+        decidida antes do canvas existir, winfo_width() devolvia 1, caia no minimo
+        de 400px e a faixa cobria so um terco da timeline. Aqui cada quadro tem
+        largura fixa e e desenhado na posicao dele, entao a faixa sempre fecha.
+        """
+        s = self.cur
+        if not s:
+            return
+        w = max(1, self.tl.winfo_width())
+        if w < 50:
+            return
+        n = max(1, -(-w // TILE_W))            # ceil
+        want = [(i + 0.5) / n * s["seconds"] for i in range(n)]
+        self._tile_times = want
+
+        def work():
+            for i, t in enumerate(want):
+                key = (s["id"], int(t))
+                if key in self.tiles:
+                    continue
+                try:
+                    p = thumb(CFG, s["id"], t, width=TILE_W, fmt="png")
+                except Exception:                              # noqa: BLE001
+                    continue
+                def apply(path=p, k=key, idx=i):
+                    if not self.cur or self.cur["id"] != k[0]:
+                        return
+                    try:
+                        self.tiles[k] = tk.PhotoImage(file=str(path))
+                    except tk.TclError:
+                        return
+                    if idx % 4 == 0 or idx == len(want) - 1:
+                        self._draw_tl()
+                self.root.after(0, apply)
+        threading.Thread(target=work, daemon=True).start()
+
     def _draw_tl(self):
         c = self.tl
         c.delete("all")
         if not self.cur:
             return
-        w, h = max(1, c.winfo_width()), 56
+        w, h = max(1, c.winfo_width()), TILE_H
         total = self.cur["seconds"]
-        img = self.strip_img.get(self.cur["id"])
-        if img:
-            c.create_image(0, 0, image=img, anchor="nw")
-        else:
-            for i in range(16):
-                c.create_rectangle(i * w / 16, 0, (i + 1) * w / 16, h,
+
+        for i, t in enumerate(getattr(self, "_tile_times", [])):
+            img = self.tiles.get((self.cur["id"], int(t)))
+            x = i * TILE_W
+            if img:
+                c.create_image(x, 0, image=img, anchor="nw")
+            else:
+                c.create_rectangle(x, 0, x + TILE_W, h,
                                    fill="#12171d" if i % 2 else "#161c23", outline="")
+
         x0, x1 = self.inp / total * w, self.out / total * w
-        c.create_rectangle(x0, 0, x1, h, fill="#1d3a5c", outline=AC, width=2)
+        # O Canvas do tk nao tem canal alpha: qualquer preenchimento por cima
+        # esconde o quadro, e stipple vira xadrez. A selecao e marcada so pelas
+        # bordas - barras no topo e na base, laterais e alcas - deixando as
+        # miniaturas totalmente visiveis.
+        c.create_rectangle(x0, 0, x1, 3, fill=AC, outline="")
+        c.create_rectangle(x0, h - 3, x1, h, fill=AC, outline="")
+        c.create_rectangle(x0, 0, x1, h, outline=AC, width=1)
+        for hx in (x0, x1):                    # alcas de arrasto
+            c.create_rectangle(hx - 4, h / 2 - 12, hx + 4, h / 2 + 12,
+                               fill=AC, outline="#0a0d11")
+            c.create_line(hx, h / 2 - 6, hx, h / 2 + 6, fill="#0a0d11")
+
         for mk in self.cur["markers"]:
             x = mk["t"] / total * w
             c.create_line(x, 0, x, 10, fill=WARN, width=2)
+
         x = self.pos / total * w
         c.create_line(x, 0, x, h, fill="white", width=2)
+        c.create_polygon(x - 5, 0, x + 5, 0, x, 7, fill="white", outline="")
 
     def _sync(self):
         self.e_in.delete(0, "end"); self.e_in.insert(0, fmt(self.inp))
