@@ -34,6 +34,7 @@ TO_LIMITED = "format=yuv420p,scale=in_range=full:out_range=limited"
 PRESETS = {
     "deliver": {
         "label": "Entrega",
+        "short": "H.264 · resolução original\n60 fps constante",
         "hint": "H.264 60 fps constante, resolução original. Abre em qualquer "
                 "player e importa limpo no Premiere e no After Effects.",
         "opts": {"codec": "h264", "container": "mp4", "quality": 19,
@@ -41,12 +42,14 @@ PRESETS = {
     },
     "raw": {
         "label": "Original",
+        "short": "HEVC sem reprocessar\ninstantâneo, sem perda",
         "hint": "Cópia do HEVC sem reprocessar. Instantâneo e sem perda, mas "
                 "mantém o framerate variável — evite no Premiere.",
         "opts": {"codec": "copy", "container": "mp4"},
     },
     "compact": {
         "label": "Compacto",
+        "short": "H.265 · 1080p\n~4× menor que a Entrega",
         "hint": "H.265 em 1080p com compressão alta. Cerca de 4× menor que a "
                 "Entrega — bom para enviar por Discord ou WhatsApp.",
         "opts": {"codec": "hevc", "container": "mp4", "quality": 30,
@@ -54,10 +57,21 @@ PRESETS = {
     },
     "edit": {
         "label": "Edição",
+        "short": "DNxHR HQ · MOV\npara grading pesado",
         "hint": "DNxHR HQ para grading pesado e After Effects. ~5,6 GB por minuto.",
         "opts": {"codec": "dnxhr", "container": "mov", "scale": 0, "fps": 60},
     },
 }
+
+CUSTOM = "custom"
+CUSTOM_META = {
+    "label": "Personalizado",
+    "short": "Ajuste codec, resolução,\nqualidade e formato",
+    "hint": "Abre a janela de configuração para você escolher codec, contêiner, "
+            "resolução, taxa de quadros, qualidade e bitrate manualmente.",
+    "opts": {},
+}
+
 
 CODECS = {
     "copy":  "Sem reprocessar (cópia)",

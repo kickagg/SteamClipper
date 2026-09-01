@@ -122,12 +122,14 @@
 
   .presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
     gap:9px;margin-bottom:14px}
-  .pr{text-align:left;padding:11px 13px;border-radius:var(--r);
-    background:var(--panel2);border:1px solid var(--line);transition:.12s}
+  .pr{text-align:left;padding:11px 13px;border-radius:var(--r);min-height:78px;
+    background:var(--panel2);border:1px solid var(--line);transition:.12s;
+    display:flex;flex-direction:column}
   .pr:hover{border-color:#3a4756}
   .pr.sel{border-color:var(--ac);background:#16222e}
   .pr b{display:block;font-size:13.5px;margin-bottom:3px}
-  .pr small{color:var(--tx2);font-size:11.5px;line-height:1.45;display:block}
+  .pr small{color:var(--tx2);font-size:11.5px;line-height:1.45;display:block;
+    white-space:pre-line}
 
   .jobs{border-top:1px solid var(--line);background:var(--panel);
     max-height:170px;overflow-y:auto;flex:0 0 auto}
@@ -294,7 +296,7 @@ function render(){
       </div>
 
       <div class="presets">
-        ${Object.entries(PRESETS).map(([k,v]) => pr(k, v.label, v.hint)).join("")}
+        ${Object.entries(PRESETS).map(([k,v]) => pr(k, v.label, v.short, v.hint)).join("")}
       </div>
       <div class="hint">Os arquivos vão para <b>${esc(OUTDIR)}</b></div>
 
@@ -307,7 +309,8 @@ function render(){
   wire(); sync();
 }
 
-const pr = (id,t,d) => `<button class="pr ${PRESET===id?"sel":""}" data-p="${id}"><b>${t}</b><small>${d}</small></button>`;
+const pr = (id,t,d,tip) => `<button class="pr ${PRESET===id?"sel":""}" data-p="${id}"
+  title="${esc(tip||d)}"><b>${t}</b><small>${esc(d)}</small></button>`;
 function sug(s){
   const d = s.started_h.replace(/[\/:]/g,"-").replace(" ","_");
   return `${s.game.replace(/[<>:"/\\|?*™®]/g,"").trim()} ${d}`;

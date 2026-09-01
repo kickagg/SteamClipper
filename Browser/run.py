@@ -36,7 +36,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from steamclipper import (PRESETS, Config, Jobs, Mpv, scan_sessions, strip,
+from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
+                          Config, Jobs, Mpv, scan_sessions, strip,
                           thumb, virtual)  # noqa: E402
 from steamclipper.steam import chunk_list                                        # noqa: E402
 
@@ -105,8 +106,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "mpv": PLAYER.available,
                                    "problems": CFG.problems(),
                                    "presets": {k: {"label": v["label"],
+                                                   "short": v["short"],
                                                    "hint": v["hint"]}
-                                               for k, v in PRESETS.items()}})
+                                               for k, v in PRESETS.items()},
+                                   "codecs": CODECS, "containers": CONTAINERS,
+                                   "scales": SCALES, "fps_choices": FPS_CHOICES})
 
             if u.path == "/api/thumb":
                 p = thumb(CFG, q["session"][0], float(q.get("t", ["0"])[0]))

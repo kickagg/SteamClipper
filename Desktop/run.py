@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
                           Config, Jobs, Mpv, estimate_mb, preset_opts,
                           scan_sessions, thumb, virtual)  # noqa: E402
+from steamclipper.export import CUSTOM, CUSTOM_META                  # noqa: E402
 from steamclipper.steam import chunk_list                                          # noqa: E402
 
 CFG = Config()
@@ -196,20 +197,25 @@ class Flat(tk.Label):
         self.config(bg=bg)
 
 
-class ExportDialog(tk.Toplevel):
-    """Modal de exportacao: preset, ajustes finos, pasta e estimativa."""
+class CustomDialog(tk.Toplevel):
+    """Configuracao do preset Personalizado.
 
-    def __init__(self, app, session, start, dur, name):
+    Nao exporta: ajusta e aplica. Quem renderiza e sempre o botao Exportar trecho,
+    para que o fluxo tenha um unico caminho de saida.
+    """
+
+    def __init__(self, app, current: dict | None = None):
         super().__init__(app.root)
-        self.app, self.session, self.start, self.dur = app, session, start, dur
+        self.app = app
+        self.session = app.cur
+        self.start, self.dur = app.inp, max(0.5, app.out - app.inp)
         self.result = None
-        self.title("Exportar trecho")
+        self.title("Configuração personalizada")
         self.configure(bg=BG)
         self.resizable(False, False)
         self.transient(app.root)
 
-        self.preset = tk.StringVar(value=app.preset)
-        o = preset_opts(app.preset)
+        o = dict(current) if current else preset_opts("deliver")
         self.codec = tk.StringVar(value=o["codec"])
         self.container = tk.StringVar(value=o["container"])
         self.scale = tk.StringVar(value=str(o.get("scale", 0)))
@@ -218,29 +224,14 @@ class ExportDialog(tk.Toplevel):
         self.bitrate = tk.StringVar(value="")
         self.outdir = tk.StringVar(value=str(CFG.output))
         self.menus = []          # (var, wrap) para _refresh_menus
-        self.fname = tk.StringVar(value=name)
+        self.fname = tk.StringVar(value=app.e_name.get().strip())
 
         pad = {"padx": 22}
-        tk.Label(self, text="Exportar trecho", bg=BG, fg=TX, font=app.fh,
+        tk.Label(self, text="Configuração personalizada", bg=BG, fg=TX, font=app.fh,
                  anchor="w").pack(fill="x", pady=(18, 2), **pad)
-        tk.Label(self, text=f"{session['game']} · {fmt(start)} → {fmt(start + dur)}"
-                            f"  ({fmt(dur)})",
-                 bg=BG, fg=TX2, font=app.fs, anchor="w").pack(fill="x", pady=(0, 14), **pad)
-
-        # ---- presets
-        pr = tk.Frame(self, bg=BG); pr.pack(fill="x", **pad)
-        self.pbtn = {}
-        for key, meta in PRESETS.items():
-            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1, cursor="hand2",
-                         highlightbackground=AC if key == app.preset else LINE)
-            b.pack(side="left", fill="both", expand=True, padx=(0, 8))
-            tk.Label(b, text=meta["label"], bg=PANEL2, fg=TX, font=app.fb).pack(pady=(8, 1))
-            tk.Label(b, text="", bg=PANEL2, fg=TX3, font=app.fs,
-                     name="est").pack(pady=(0, 8))
-            for w in (b, *b.winfo_children()):
-                w.bind("<Button-1>", lambda e, k=key: self._pick(k))
-            Tooltip(b, meta["hint"])
-            self.pbtn[key] = b
+        tk.Label(self, text="Ajuste e aplique. A exportação continua no botão "
+                            "“Exportar trecho”.",
+                 bg=BG, fg=TX2, font=app.fs, anchor="w").pack(fill="x", pady=(0, 4), **pad)
 
         tk.Frame(self, bg=LINE, height=1).pack(fill="x", pady=16, **pad)
 
@@ -323,7 +314,7 @@ class ExportDialog(tk.Toplevel):
         self.est_lbl.pack(fill="x", pady=(16, 0), **pad)
 
         act = tk.Frame(self, bg=BG); act.pack(fill="x", pady=(12, 20), **pad)
-        Flat(act, "Exportar", self._ok, bg=AC, fg="white", pad=(22, 9),
+        Flat(act, "Aplicar", self._ok, bg=AC, fg="white", pad=(22, 9),
              font=app.fb).pack(side="right")
         Flat(act, "Cancelar", self.destroy, pad=(18, 9), font=app.f).pack(side="right", padx=8)
 
@@ -332,10 +323,15 @@ class ExportDialog(tk.Toplevel):
         self.bind("<Escape>", lambda e: self.destroy())
         self.bind("<Return>", lambda e: self._ok())
         self.update_idletasks()
-        x = app.root.winfo_rootx() + (app.root.winfo_width() - self.winfo_width()) // 2
-        y = app.root.winfo_rooty() + max(20, (app.root.winfo_height() - self.winfo_height()) // 2)
-        self.geometry(f"+{x}+{y}")
+        # Centraliza na TELA e prende dentro dela: centralizar pela janela pai
+        # jogava o rodape (e o botao) para fora quando a janela estava baixa.
+        w, h = self.winfo_width(), self.winfo_height()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        x = max(0, (sw - w) // 2)
+        y = max(0, min((sh - h) // 2, sh - h - 40))
+        self.geometry(f"{w}x{h}+{x}+{y}")
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _menu(self, parent, var, values, on_change, fmt_fn):
         wrap = tk.Frame(parent, bg=PANEL2)
@@ -355,23 +351,6 @@ class ExportDialog(tk.Toplevel):
         wrap._label, wrap._fmt = lbl, fmt_fn
         self.menus.append((var, wrap))
         return wrap
-
-    def _pick(self, key):
-        self.preset.set(key)
-        o = preset_opts(key)
-        for k, b in self.pbtn.items():
-            b.config(highlightbackground=AC if k == key else LINE)
-        for var, name in ((self.codec, "codec"), (self.container, "container")):
-            var.set(o[name])
-        self.scale.set(str(o.get("scale", 0)))
-        self.fps.set(str(o.get("fps", 60)))
-        self.quality.set(o.get("quality", 19))
-        self.qvar.set(str(_nearest_quality(o.get("quality", 19))))
-        self.quality.set(int(self.qvar.get()))
-        self.bitrate.set("")
-        self._refresh_menus()
-        self._sync_container()
-        self._est()
 
     def _refresh_menus(self):
         """Reescreve o rotulo de cada menu depois que um preset troca as opcoes."""
@@ -404,9 +383,7 @@ class ExportDialog(tk.Toplevel):
         mb = estimate_mb(o, self.dur, src / 1048576)
         self.est_lbl.config(text=f"Estimativa: ~{mb:.0f} MB para {fmt(self.dur)} "
                                  f"de vídeo (valor aproximado)")
-        for key, b in self.pbtn.items():
-            est = estimate_mb(preset_opts(key), self.dur, src / 1048576)
-            b.children["est"].config(text=f"~{est:.0f} MB")
+
 
     def _browse(self):
         d = filedialog.askdirectory(parent=self, initialdir=self.outdir.get(),
@@ -441,6 +418,8 @@ class App:
         self._tile_times = []
         self._tl_job = None
         self._fs = None           # janela de tela cheia do player
+        self.dlg = None           # instancia unica do CustomDialog
+        self.custom_opts = CFG.settings.get('custom_opts') or {}
         self.mpv = Mpv(CFG.libmpv)
         self.cards = []
 
@@ -745,19 +724,30 @@ class App:
         q["menu"].config(bg=PANEL2, fg=TX, font=self.fs)
         q.pack(fill="x")
 
+        # grid com colunas de peso igual: com pack os cards mudavam de tamanho
+        # conforme o texto de cada um. Altura fixa e texto curto de duas linhas
+        # mantem todos iguais.
         pr = tk.Frame(mn, bg=BG); pr.pack(fill="x", padx=20, pady=(14, 0))
         self.preset_btns = {}
-        for key, meta in PRESETS.items():
-            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1,
+        cards = list(PRESETS.items()) + [(CUSTOM, CUSTOM_META)]
+        for col, (key, meta) in enumerate(cards):
+            pr.columnconfigure(col, weight=1, uniform="preset")
+            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1, height=78,
                          highlightbackground=AC if key == self.preset else LINE,
                          cursor="hand2")
-            b.pack(side="left", fill="x", expand=True, padx=(0, 9))
-            tk.Label(b, text=meta["label"], bg=PANEL2, fg=TX, font=self.fb,
-                     anchor="w").pack(fill="x", padx=12, pady=(9, 0))
-            tk.Label(b, text=meta["hint"], bg=PANEL2, fg=TX2, font=self.fs,
-                     anchor="w", justify="left", wraplength=260).pack(fill="x", padx=12,
-                                                                     pady=(2, 10))
-            for w in (b, *b.winfo_children()):
+            b.grid(row=0, column=col, sticky="nsew",
+                   padx=(0, 0 if col == len(cards) - 1 else 8))
+            b.grid_propagate(False)
+            head = tk.Frame(b, bg=PANEL2); head.pack(fill="x", padx=12, pady=(9, 0))
+            tk.Label(head, text=meta["label"], bg=PANEL2, fg=TX, font=self.fb,
+                     anchor="w").pack(side="left")
+            if key == CUSTOM:
+                tk.Label(head, text="⚙", bg=PANEL2, fg=TX3,
+                         font=self.f).pack(side="right")
+            tk.Label(b, text=meta["short"], bg=PANEL2, fg=TX2, font=self.fs,
+                     anchor="nw", justify="left").pack(fill="both", expand=True,
+                                                       padx=12, pady=(3, 9))
+            for w in (b, head, *head.winfo_children(), *b.winfo_children()):
                 w.bind("<Button-1>", lambda e, k=key: self.set_preset(k))
             Tooltip(b, meta["hint"])
             self.preset_btns[key] = b
@@ -907,6 +897,52 @@ class App:
         self.preset = key
         for k, b in self.preset_btns.items():
             b.config(highlightbackground=AC if k == key else LINE)
+        if key == CUSTOM:
+            self.open_custom()
+
+    def open_custom(self):
+        """Janela de configuracao do preset Personalizado.
+
+        Instancia unica: clicar de novo traz a que ja esta aberta para a frente,
+        em vez de empilhar copias.
+        """
+        if self.dlg and self.dlg.winfo_exists():
+            self.dlg.lift(); self.dlg.focus_force()
+            return
+        if not self.cur:
+            return
+        self.dlg = CustomDialog(self, self.custom_opts)
+        self.root.wait_window(self.dlg)
+        if self.dlg.result:
+            self.custom_opts = self.dlg.result
+            CFG.settings['custom_opts'] = self.custom_opts
+            from steamclipper.config import save_settings
+            save_settings(CFG.settings)
+        self.dlg = None
+        self._update_custom_card()
+
+    def _update_custom_card(self):
+        """Mostra no card o que foi configurado, em vez do texto generico."""
+        o = self.custom_opts
+        card = self.preset_btns.get(CUSTOM)
+        try:
+            if not card or not card.winfo_exists():
+                return
+            lbl = [w for w in card.winfo_children() if isinstance(w, tk.Label)]
+        except tk.TclError:      # janela fechando enquanto o modal retorna
+            return
+        if not lbl:
+            return
+        if o:
+            res = SCALES.get(int(o.get("scale") or 0), "Original")
+            cod = {"h264": "H.264", "hevc": "H.265", "copy": "Cópia",
+                   "dnxhr": "DNxHR"}.get(o.get("codec"), o.get("codec", ""))
+            extra = (f"{int(o['bitrate'])} kbps" if o.get("bitrate")
+                     else QUALITY_LEVELS.get(int(o.get("quality", 19)), "").split(" (")[0])
+            lbl[-1].config(text=f"{cod} · {res} · {o.get('container','mp4').upper()}\n"
+                                f"{extra}")
+        else:
+            lbl[-1].config(text=CUSTOM_META["short"])
 
     def reload(self):
         self.sessions = scan_sessions(CFG)
@@ -917,18 +953,25 @@ class App:
         subprocess.Popen(["explorer", str(CFG.output)])
 
     def export(self):
+        """Exporta com o preset selecionado. Este botao sempre renderiza."""
         if not self.cur:
             return
         dur = max(0.5, self.out - self.inp)
-        dlg = ExportDialog(self, self.cur, self.inp, dur,
-                           self.e_name.get().strip() or self.cur["game"])
-        self.root.wait_window(dlg)
-        if not dlg.result:
-            return
-        preset, opts, name = dlg.result
-        self.preset = preset
-        self.set_preset(preset)
-        JOBS.submit(self.cur["id"], preset, self.inp, dur, name, opts)
+        name = self.e_name.get().strip() or self.cur["game"]
+
+        if self.preset == CUSTOM:
+            if not self.custom_opts:          # nunca configurou: abre e volta
+                self.open_custom()
+                if not self.custom_opts:
+                    return
+            opts = dict(self.custom_opts)
+            base = "deliver"
+        else:
+            opts = preset_opts(self.preset)
+            base = self.preset
+        opts["outdir"] = str(CFG.output)
+
+        JOBS.submit(self.cur["id"], base, self.inp, dur, name, opts)
         self.jobs_frame.pack(fill="x", side="bottom")
 
     def quit(self):
