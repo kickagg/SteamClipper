@@ -28,7 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
                           Config, Jobs, Mpv, estimate_mb, preset_opts,
                           scan_sessions, thumb, virtual)  # noqa: E402
-from steamclipper.export import CUSTOM, CUSTOM_META                  # noqa: E402
+from steamclipper.export import (CUSTOM, CUSTOM_META, MIN_DURATION,
+                                 format_estimate, human_mb, output_name,
+                                 timecode)  # noqa: E402
 from steamclipper.steam import chunk_list                                          # noqa: E402
 
 CFG = Config()
@@ -379,10 +381,11 @@ class CustomDialog(tk.Toplevel):
 
     def _est(self, *_):
         o = self._opts()
-        src = self.session['bytes'] / self.session['seconds']  # MB/s reais
-        mb = estimate_mb(o, self.dur, src / 1048576)
-        self.est_lbl.config(text=f"Estimativa: ~{mb:.0f} MB para {fmt(self.dur)} "
-                                 f"de vídeo (valor aproximado)")
+        src = self.session["bytes"] / self.session["seconds"] / 1048576
+        self.est_lbl.config(
+            text=f"Tamanho provável: {format_estimate(o, self.dur, src)}"
+                 f"   ·   {fmt(self.dur)} de vídeo\n"
+                 "A faixa é ampla porque o tamanho depende do movimento na cena.")
 
 
     def _browse(self):
@@ -394,6 +397,13 @@ class CustomDialog(tk.Toplevel):
     def _ok(self):
         o = self._opts()
         if o["outdir"]:
+            destino = Path(o["outdir"])
+            if not destino.exists():
+                if not messagebox.askyesno(
+                        "SteamClipper",
+                        "A pasta não existe:\n" + str(destino) + "\n\nCriar agora?",
+                        parent=self):
+                    return
             try:
                 CFG.set_output(o["outdir"])       # vira o padrao das proximas vezes
             except OSError as e:
@@ -844,11 +854,27 @@ class App:
             setattr(self, attr, e)
 
         f = tk.Frame(row, bg=BG); f.pack(side="left", fill="x", expand=True, padx=(0, 12))
-        tk.Label(f, text="NOME DO ARQUIVO", bg=BG, fg=TX3, font=self.fs,
-                 anchor="w").pack(fill="x")
+        hdr = tk.Frame(f, bg=BG); hdr.pack(fill="x")
+        tk.Label(hdr, text="NOME DO ARQUIVO", bg=BG, fg=TX3, font=self.fs,
+                 anchor="w").pack(side="left")
+        # O sufixo de trecho era obrigatorio; agora e escolha, e mostra timecode
+        # em vez de segundos crus.
+        self.suffix_on = tk.BooleanVar(value=CFG.settings.get("name_suffix", True))
+        chk = tk.Checkbutton(hdr, text="incluir trecho no nome",
+                             variable=self.suffix_on, command=self._name_changed,
+                             bg=BG, fg=TX3, font=self.fs, bd=0, highlightthickness=0,
+                             activebackground=BG, activeforeground=TX,
+                             selectcolor=PANEL2, cursor="hand2")
+        chk.pack(side="right")
+        Tooltip(chk, "Acrescenta o trecho ao nome, como [12m30s-14m00s].\n"
+                     "Desligado, o arquivo fica só com o nome que você escreveu.")
         self.e_name = tk.Entry(f, bg=PANEL2, fg=TX, font=self.f, bd=0,
                                insertbackground=TX)
         self.e_name.pack(fill="x", ipady=5)
+        self.e_name.bind("<KeyRelease>", lambda e: self._name_changed())
+        self.name_preview = tk.Label(f, text="", bg=BG, fg=TX3, font=self.fs,
+                                     anchor="w")
+        self.name_preview.pack(fill="x", pady=(3, 0))
         Tooltip(self.e_name, "Nome do arquivo exportado.\nVai para: " + str(CFG.output))
 
         f = tk.Frame(row, bg=BG); f.pack(side="left")
@@ -867,18 +893,20 @@ class App:
         # grid com colunas de peso igual: com pack os cards mudavam de tamanho
         # conforme o texto de cada um. Altura fixa e texto curto de duas linhas
         # mantem todos iguais.
-        pr = tk.Frame(mn, bg=BG); pr.pack(fill="x", padx=20, pady=(14, 0))
+        pr = tk.Frame(mn, bg=BG); pr.pack(fill="x", padx=16, pady=(14, 0))
         self.preset_btns = {}
         cards = list(PRESETS.items()) + [(CUSTOM, CUSTOM_META)]
         for col, (key, meta) in enumerate(cards):
             pr.columnconfigure(col, weight=1, uniform="preset")
-            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1, height=78,
+            b = tk.Frame(pr, bg=PANEL2, highlightthickness=1, height=78, width=10,
                          highlightbackground=AC if key == self.preset else LINE,
                          cursor="hand2")
-            b.grid(row=0, column=col, sticky="nsew",
-                   padx=(0, 0 if col == len(cards) - 1 else 8))
+            b.grid(row=0, column=col, sticky="nsew", padx=4)
             b.grid_propagate(False)
-            head = tk.Frame(b, bg=PANEL2); head.pack(fill="x", padx=12, pady=(9, 0))
+            head = tk.Frame(b, bg=PANEL2, width=1)   # largura vem do grid, nao do texto
+            head.pack(fill="x", padx=12, pady=(9, 0))
+            head.pack_propagate(False)
+            head.config(height=20)
             tk.Label(head, text=meta["label"], bg=PANEL2, fg=TX, font=self.fb,
                      anchor="w").pack(side="left")
             if key == CUSTOM:
@@ -1037,6 +1065,7 @@ class App:
         self.preset = key
         for k, b in self.preset_btns.items():
             b.config(highlightbackground=AC if k == key else LINE)
+        self._name_changed()
         if key == CUSTOM:
             self.open_custom()
 
@@ -1110,6 +1139,7 @@ class App:
             opts = preset_opts(self.preset)
             base = self.preset
         opts["outdir"] = str(CFG.output)
+        opts["suffix"] = bool(self.suffix_on.get())
 
         jid = JOBS.submit(self.cur["id"], base, self.inp, dur, name, opts)
         JOBS._upd(jid, start=self.inp)       # o painel mostra o trecho exportado
@@ -1231,12 +1261,32 @@ class App:
         c.create_line(x, 0, x, h, fill="white", width=2)
         c.create_polygon(x - 5, 0, x + 5, 0, x, 7, fill="white", outline="")
 
+    def _name_changed(self):
+        """Mostra o nome final e guarda a preferencia de sufixo."""
+        if not self.cur:
+            return
+        dur = max(MIN_DURATION, self.out - self.inp)
+        ext = preset_opts(self.preset if self.preset != CUSTOM else "deliver")["container"]
+        if self.preset == CUSTOM and self.custom_opts:
+            ext = self.custom_opts.get("container", ext)
+        nome = output_name(self.e_name.get(), self.inp, dur, ext,
+                           with_suffix=self.suffix_on.get(),
+                           fallback=self.cur["game"])
+        opts = (self.custom_opts if self.preset == CUSTOM and self.custom_opts
+                else preset_opts(self.preset))
+        self.name_preview.config(text=f"{nome}   ·   {format_estimate(opts, dur)}")
+        if CFG.settings.get("name_suffix") != self.suffix_on.get():
+            CFG.settings["name_suffix"] = self.suffix_on.get()
+            from steamclipper.config import save_settings
+            save_settings(CFG.settings)
+
     def _sync(self):
         self.e_in.delete(0, "end"); self.e_in.insert(0, fmt(self.inp))
         self.e_out.delete(0, "end"); self.e_out.insert(0, fmt(self.out))
         self.e_dur.config(state="normal")
         self.e_dur.delete(0, "end"); self.e_dur.insert(0, fmt(self.out - self.inp))
         self.e_dur.config(state="disabled")
+        self._name_changed()
 
     def _commit(self):
         if not self.cur:
