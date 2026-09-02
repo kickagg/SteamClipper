@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import subprocess
 import threading
 import uuid
@@ -85,6 +86,19 @@ CONTAINERS = {"mp4": "MP4", "mkv": "MKV", "mov": "MOV"}
 SCALES = {0: "Original", 1440: "1440p", 1080: "1080p", 720: "720p", 480: "480p"}
 
 FPS_CHOICES = {0: "Original", 60: "60 fps", 30: "30 fps"}
+
+
+def describe(opts: dict) -> str:
+    """Resumo curto da configuracao, do jeito que o painel mostra."""
+    codec = {"h264": "H.264", "hevc": "H.265", "copy": "Cópia direta",
+             "dnxhr": "DNxHR HQ"}.get(opts.get("codec"), opts.get("codec", "?"))
+    if opts.get("codec") == "copy":
+        return f"{codec} · {opts.get('container', 'mp4').upper()}"
+    res = SCALES.get(int(opts.get("scale") or 0), "Original")
+    fps = FPS_CHOICES.get(int(opts.get("fps") or 0), "Original")
+    q = (f"{int(opts['bitrate'])} kbps" if opts.get("bitrate")
+         else f"CQ {opts.get('quality', 19)}")
+    return f"{codec} · {res} · {fps} · {q} · {opts.get('container','mp4').upper()}"
 
 
 def preset_opts(preset: str) -> dict:
@@ -167,7 +181,11 @@ def estimate_mb(opts: dict, seconds: float, src_mb_s: float | None = None) -> fl
         # sem reprocessar o tamanho e o do proprio material
         return seconds * (src_mb_s if src_mb_s else 3.9)
     if codec == "dnxhr":
-        return seconds * 93.0                   # ~5,6 GB/min medido
+        # DNxHR e intra-frame: o tamanho acompanha pixels x quadros, nao a cena.
+        # Ancora: 1440p60 medido em 93 MB/s -> 0,441 byte por pixel.
+        h = int(opts.get("scale") or 0) or 1440
+        fps = int(opts.get("fps") or 0) or 60
+        return seconds * (h * 16 / 9) * h * fps * 0.441 / 1048576
     if opts.get("bitrate"):
         return seconds * int(opts["bitrate"]) / 8 / 1024
 
@@ -238,7 +256,9 @@ class Jobs:
         jid = uuid.uuid4().hex
         self._upd(jid, id=jid, session=sid, preset=preset, label=name,
                   status="na fila", pct=0, opts=o, canceled=False,
-                  estimate_mb=round(estimate_mb(o, dur), 1))
+                  seconds=dur, started=time.time(), elapsed=0.0, eta=None,
+                  bytes_now=0, estimate_mb=round(estimate_mb(o, dur), 1),
+                  summary=describe(o))
         threading.Thread(target=self._run, daemon=True,
                          args=(jid, sid, start, dur, name, o)).start()
         return jid
@@ -255,6 +275,14 @@ class Jobs:
         fine = start - skip * seg
         take = int(-(-(fine + dur) // seg)) + 1 if dur > 0 else len(vch)
         vsel, asel = vch[skip:skip + take], ach[skip:skip + take]
+        # Um trecho fora do material vira "ffmpeg saiu com codigo 0": o ffmpeg
+        # roda sem entrada e devolve arquivo vazio com sucesso. Reportado como
+        # erro do job (nao levantado aqui, que fica fora do try).
+        if not vsel:
+            self._upd(jid, status="erro",
+                      error=f"O trecho começa em {start:.0f}s, mas esta gravação "
+                            f"só tem {len(vch) * seg:.0f}s.")
+            return
 
         tmp = Path(os.environ["TEMP"]) / f"steamclipper_{jid[:8]}"
         tmp.mkdir(parents=True, exist_ok=True)
@@ -296,13 +324,26 @@ class Jobs:
                                  text=True, bufsize=1, **NOEXEC)
             with self.lock:
                 self.procs[jid] = p
+            t0 = time.time()
             for line in p.stdout:
-                if line.startswith("out_time_ms="):
-                    try:
-                        secs = int(line.split("=", 1)[1]) / 1e6
-                        self._upd(jid, pct=min(99, round(secs / total * 100)) if total else 0)
-                    except ValueError:
-                        pass
+                if not line.startswith("out_time_ms="):
+                    continue
+                try:
+                    secs = int(line.split("=", 1)[1]) / 1e6
+                except ValueError:
+                    continue
+                frac = (secs / total) if total else 0
+                elapsed = time.time() - t0
+                # ETA pela velocidade media ate aqui; so vale depois de 2% para
+                # nao mostrar numeros absurdos nos primeiros quadros.
+                eta = (elapsed / frac - elapsed) if frac > 0.02 else None
+                try:
+                    now_bytes = out.stat().st_size
+                except OSError:
+                    now_bytes = 0
+                self._upd(jid, pct=min(99, round(frac * 100)), elapsed=elapsed,
+                          eta=eta, bytes_now=now_bytes,
+                          speed=(secs / elapsed) if elapsed > 0.5 else None)
             p.wait()
 
             if self.get(jid).get("canceled"):

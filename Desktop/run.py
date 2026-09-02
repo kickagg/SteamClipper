@@ -397,11 +397,150 @@ class CustomDialog(tk.Toplevel):
             try:
                 CFG.set_output(o["outdir"])       # vira o padrao das proximas vezes
             except OSError as e:
-                messagebox.showerror("SteamClipper", f"Pasta inválida:\n{e}",
+                messagebox.showerror("SteamClipper",
+                                     "Pasta inválida:" + chr(10) + str(e),
                                      parent=self)
                 return
-        self.result = (self.preset.get(), o, self.fname.get().strip() or "clipe")
+        name = self.fname.get().strip()
+        if name:
+            self.app.e_name.delete(0, "end")
+            self.app.e_name.insert(0, name)
+        self.result = o
         self.destroy()
+
+
+class RenderDialog(tk.Toplevel):
+    """Painel de renderizacao: o que esta sendo gerado, quanto falta e cancelar."""
+
+    def __init__(self, app, job_id):
+        super().__init__(app.root)
+        self.app, self.jid = app, job_id
+        self.done = False
+        self.title("Renderizando")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(app.root)
+
+        j = JOBS.get(job_id)
+        pad = {"padx": 22}
+
+        self.head = tk.Label(self, text="Renderizando trecho", bg=BG, fg=TX,
+                             font=app.fh, anchor="w")
+        self.head.pack(fill="x", pady=(18, 2), **pad)
+        self.file_lbl = tk.Label(self, text=j.get("label", ""), bg=BG, fg=TX2,
+                                 font=app.fs, anchor="w")
+        self.file_lbl.pack(fill="x", pady=(0, 14), **pad)
+
+        box = tk.Frame(self, bg=PANEL2); box.pack(fill="x", **pad)
+        self.rows = {}
+        for key, label in (("summary", "CONFIGURAÇÃO"), ("trecho", "TRECHO"),
+                           ("size", "TAMANHO"), ("dest", "DESTINO")):
+            r = tk.Frame(box, bg=PANEL2); r.pack(fill="x", padx=14, pady=(9, 0))
+            tk.Label(r, text=label, bg=PANEL2, fg=TX3, font=app.fs, width=13,
+                     anchor="w").pack(side="left")
+            v = tk.Label(r, text="", bg=PANEL2, fg=TX, font=app.fs, anchor="w",
+                         justify="left", wraplength=330)
+            v.pack(side="left", fill="x", expand=True)
+            self.rows[key] = v
+        tk.Frame(box, bg=PANEL2, height=10).pack()
+
+        self.bar = tk.Canvas(self, height=8, bg="#232c37", highlightthickness=0)
+        self.bar.pack(fill="x", pady=(16, 6), **pad)
+        line = tk.Frame(self, bg=BG); line.pack(fill="x", **pad)
+        self.pct_lbl = tk.Label(line, text="0%", bg=BG, fg=AC, font=app.fb)
+        self.pct_lbl.pack(side="left")
+        self.eta_lbl = tk.Label(line, text="calculando…", bg=BG, fg=TX2, font=app.fs)
+        self.eta_lbl.pack(side="right")
+
+        self.act = tk.Frame(self, bg=BG); self.act.pack(fill="x", pady=(18, 20), **pad)
+        self.btn_main = Flat(self.act, "Cancelar", self._cancel, pad=(20, 9),
+                             font=app.f)
+        self.btn_main.pack(side="right")
+        self.btn_alt = Flat(self.act, "Abrir pasta", app.reveal, pad=(18, 9),
+                            font=app.f)
+
+        self._fill(j)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda e: self._close())
+        self.update_idletasks()
+        w, h = self.winfo_width(), self.winfo_height()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}"
+                      f"+{max(0, min((sh - h) // 2, sh - h - 40))}")
+        self._tick()
+
+    def _fill(self, j):
+        o = j.get("opts", {})
+        self.rows["summary"].config(text=j.get("summary", ""))
+        start = j.get("start", self.app.inp)
+        self.rows["trecho"].config(
+            text=f"{fmt(start)} → {fmt(start + j.get('seconds', 0))}"
+                 f"  ({fmt(j.get('seconds', 0))})")
+        self.rows["dest"].config(text=str(o.get("outdir") or CFG.output))
+
+    def _cancel(self):
+        if self.done:
+            return
+        JOBS.cancel(self.jid)
+
+    def _close(self):
+        # Fechar durante a renderizacao nao cancela: o trabalho continua e o
+        # progresso volta a aparecer na barra inferior.
+        self.destroy()
+        self.app.render_dlg = None
+
+    def _tick(self):
+        if not self.winfo_exists():
+            return
+        j = JOBS.get(self.jid)
+        if not j:
+            return self._close()
+        st = j.get("status", "")
+        pct = j.get("pct", 0)
+
+        w = max(1, self.bar.winfo_width())
+        color = {"pronto": OK, "erro": ERR, "cancelado": WARN}.get(st, AC)
+        self.bar.delete("all")
+        self.bar.create_rectangle(0, 0, w * max(0, min(100, pct)) / 100, 8,
+                                  fill=color, outline="")
+
+        now = j.get("bytes_now", 0) / 1048576
+        est = j.get("estimate_mb", 0)
+        if st == "pronto":
+            self.rows["size"].config(text=f"{j.get('size', 0) / 1048576:.1f} MB")
+        elif now:
+            self.rows["size"].config(text=f"{now:.1f} MB de ~{est:.0f} MB previstos")
+        else:
+            self.rows["size"].config(text=f"~{est:.0f} MB previstos")
+
+        if st in ("pronto", "erro", "cancelado"):
+            self.done = True
+            self.pct_lbl.config(
+                text={"pronto": "Concluído", "erro": "Falhou",
+                      "cancelado": "Cancelado"}[st], fg=color)
+            self.head.config(text={"pronto": "Renderização concluída",
+                                   "erro": "A renderização falhou",
+                                   "cancelado": "Renderização cancelada"}[st])
+            took = j.get("elapsed", 0)
+            self.eta_lbl.config(
+                text=(f"em {fmt(took)}" if st == "pronto" else
+                      j.get("error", "arquivo parcial removido")[:60]))
+            self.btn_main.config(text="Fechar")
+            self.btn_main._cmd = self._close
+            self.btn_main.bind("<Button-1>", lambda e: self._close())
+            if st == "pronto":
+                self.btn_alt.pack(side="right", padx=8)
+            return
+        self.pct_lbl.config(text=f"{pct}%", fg=AC)
+        eta = j.get("eta")
+        speed = j.get("speed")
+        parts = []
+        if eta is not None:
+            parts.append(f"faltam ~{fmt(eta)}")
+        if speed:
+            parts.append(f"{speed:.1f}× tempo real")
+        self.eta_lbl.config(text=" · ".join(parts) or f"{st}…")
+        self.after(400, self._tick)
 
 
 # ------------------------------------------------------------------- app
@@ -419,6 +558,7 @@ class App:
         self._tl_job = None
         self._fs = None           # janela de tela cheia do player
         self.dlg = None           # instancia unica do CustomDialog
+        self.render_dlg = None    # painel de renderizacao
         self.custom_opts = CFG.settings.get('custom_opts') or {}
         self.mpv = Mpv(CFG.libmpv)
         self.cards = []
@@ -971,8 +1111,11 @@ class App:
             base = self.preset
         opts["outdir"] = str(CFG.output)
 
-        JOBS.submit(self.cur["id"], base, self.inp, dur, name, opts)
-        self.jobs_frame.pack(fill="x", side="bottom")
+        jid = JOBS.submit(self.cur["id"], base, self.inp, dur, name, opts)
+        JOBS._upd(jid, start=self.inp)       # o painel mostra o trecho exportado
+        if self.render_dlg and self.render_dlg.winfo_exists():
+            self.render_dlg.destroy()
+        self.render_dlg = RenderDialog(self, jid)
 
     def quit(self):
         self.mpv.destroy()
@@ -1155,6 +1298,8 @@ class App:
                 self.jobs_cancel.pack_forget()
                 self.jobs_close.pack(side="left")
             self.jobs_frame.pack(fill="x", side="bottom")
+        else:
+            self.jobs_frame.pack_forget()
         self.root.after(400, self._tick)
 
 

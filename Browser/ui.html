@@ -145,6 +145,25 @@
   .st.ok{color:var(--ok)} .st.er{color:var(--err)} .st.go{color:var(--ac)}
   .err{background:#2d1416;border:1px solid #5c2427;color:#ffb4ae;padding:9px 12px;
     border-radius:8px;font-size:12.5px;margin-bottom:12px}
+  .ovl{position:fixed;inset:0;background:rgba(5,7,10,.72);backdrop-filter:blur(3px);
+    display:grid;place-items:center;z-index:50}
+  .ovl.hide{display:none}
+  .rmodal{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    width:460px;max-width:92vw;padding:22px 24px 20px;
+    box-shadow:0 24px 60px rgba(0,0,0,.6)}
+  .rmodal h3{margin:0 0 3px;font-size:17px;font-weight:600}
+  .rmodal .sub{color:var(--tx2);font-size:12.5px;margin-bottom:16px}
+  .rinfo{background:var(--panel2);border-radius:9px;padding:12px 14px;margin-bottom:16px}
+  .rrow{display:flex;gap:10px;font-size:12.5px;padding:3px 0}
+  .rrow b{color:var(--tx3);font-weight:600;min-width:104px;text-transform:uppercase;
+    font-size:10.5px;letter-spacing:.6px;padding-top:2px}
+  .rrow span{color:var(--tx);flex:1}
+  .rbar{height:8px;border-radius:4px;background:#232c37;overflow:hidden;margin-bottom:8px}
+  .rbar i{display:block;height:100%;background:var(--ac);transition:width .3s}
+  .rfoot{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:18px}
+  .rfoot .pc{font-weight:700;color:var(--ac)}
+  .rfoot .eta{color:var(--tx2)}
+  .racts{display:flex;justify-content:flex-end;gap:8px}
   kbd{background:#232c37;border:1px solid var(--line);border-bottom-width:2px;
     border-radius:4px;padding:0 5px;font:600 11px/1.6 inherit}
 </style>
@@ -171,11 +190,28 @@
 
 <div class="jobs hide" id="jobs"></div>
 
+<div class="ovl hide" id="rovl">
+  <div class="rmodal">
+    <h3 id="rTitle">Renderizando trecho</h3>
+    <div class="sub" id="rFile"></div>
+    <div class="rinfo">
+      <div class="rrow"><b>Configuração</b><span id="rCfg"></span></div>
+      <div class="rrow"><b>Trecho</b><span id="rSeg"></span></div>
+      <div class="rrow"><b>Tamanho</b><span id="rSize"></span></div>
+      <div class="rrow"><b>Destino</b><span id="rDest"></span></div>
+    </div>
+    <div class="rbar"><i id="rBar" style="width:0%"></i></div>
+    <div class="rfoot"><span class="pc" id="rPct">0%</span>
+      <span class="eta" id="rEta">calculando…</span></div>
+    <div class="racts" id="rActs"></div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
 let SESS = [], CUR = null, PRESET = "deliver", IN = 0, OUT = 0, MPVOK = false;
-let PRESETS = {}, OUTDIR = "";
+let PRESETS = {}, OUTDIR = "", RJOB = null;
 let POS = 0, PLAYING = false, MPVON = false, poller = null;
 
 const fmt = s => {
@@ -431,7 +467,9 @@ async function doExport(){
     body:JSON.stringify({session:CUR.id,preset:PRESET,start:IN,
       duration:Math.max(.5,OUT-IN),quality:+$("#fQ").value,
       name:$("#fName").value.trim()||CUR.game})}).then(r=>r.json());
-  if(r.error) alert("Erro: "+r.error);
+  if(r.error){ alert("Erro: "+r.error); return; }
+  RJOB = r.job;
+  $("#rovl").classList.remove("hide");
   poll();
 }
 
@@ -452,8 +490,49 @@ async function poll(){
       ${running ? `<button class="btn sm" onclick="cancelJob('${j.id}')">Cancelar</button>` : ""}
       </div>`;
   }).join("");
-  if(list.some(j=>j.status!=="pronto"&&j.status!=="erro")) setTimeout(poll,700);
+  if(RJOB && jobs[RJOB]) paintRender(jobs[RJOB]);
+  if(list.some(j=>j.status!=="pronto"&&j.status!=="erro"&&j.status!=="cancelado"))
+    setTimeout(poll,500);
 }
+
+function paintRender(j){
+  const done = ["pronto","erro","cancelado"].includes(j.status);
+  const color = j.status==="pronto" ? "var(--ok)"
+              : j.status==="erro" ? "var(--err)"
+              : j.status==="cancelado" ? "var(--warn)" : "var(--ac)";
+  $("#rTitle").textContent = {pronto:"Renderização concluída",
+    erro:"A renderização falhou", cancelado:"Renderização cancelada"}[j.status]
+    || "Renderizando trecho";
+  $("#rFile").textContent = j.label || "";
+  $("#rCfg").textContent = j.summary || "";
+  $("#rSeg").textContent = j.seconds ? fmt(j.seconds) + " de vídeo" : "";
+  $("#rDest").textContent = (j.opts && j.opts.outdir) || OUTDIR;
+  const mb = (j.bytes_now||0)/1048576, est = j.estimate_mb||0;
+  $("#rSize").textContent = j.status==="pronto"
+    ? ((j.size||0)/1048576).toFixed(1)+" MB"
+    : (mb ? `${mb.toFixed(1)} MB de ~${est.toFixed(0)} MB previstos`
+          : `~${est.toFixed(0)} MB previstos`);
+  $("#rBar").style.width = (j.pct||0)+"%";
+  $("#rBar").style.background = color;
+  $("#rPct").style.color = color;
+  $("#rPct").textContent = done
+    ? {pronto:"Concluído",erro:"Falhou",cancelado:"Cancelado"}[j.status] : (j.pct||0)+"%";
+  const bits = [];
+  if(!done && j.eta != null) bits.push("faltam ~"+fmt(j.eta));
+  if(!done && j.speed) bits.push(j.speed.toFixed(1)+"× tempo real");
+  $("#rEta").textContent = done
+    ? (j.status==="pronto" ? "em "+fmt(j.elapsed||0) : (j.error||"arquivo parcial removido"))
+    : (bits.join(" · ") || j.status+"…");
+  const openBtn = j.status === "pronto"
+    ? '<button class="btn" onclick="revealOut()">Abrir pasta</button>' : "";
+  $("#rActs").innerHTML = done
+    ? `${openBtn}<button class="btn p" onclick="closeRender()">Fechar</button>`
+    : `<button class="btn" onclick="closeRender()">Ocultar</button>
+       <button class="btn" onclick="cancelJob('${j.id}')">Cancelar</button>`;
+}
+
+window.closeRender = () => { $("#rovl").classList.add("hide"); RJOB = null; };
+window.revealOut = () => fetch("/api/reveal", {method: "POST"});
 
 window.cancelJob = async id => {
   await fetch("/api/export/cancel", {method:"POST",
