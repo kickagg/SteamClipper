@@ -85,7 +85,9 @@ CONTAINERS = {"mp4": "MP4", "mkv": "MKV", "mov": "MOV"}
 
 SCALES = {0: "Original", 1440: "1440p", 1080: "1080p", 720: "720p", 480: "480p"}
 
-FPS_CHOICES = {0: "Original", 60: "60 fps", 30: "30 fps"}
+# "Original" prometia preservar o VFR e nao preservava - reencodar sempre gera
+# framerate constante. O rotulo agora diz o que realmente acontece.
+FPS_CHOICES = {0: "Do material (constante)", 60: "60 fps", 30: "30 fps"}
 
 
 # DNxHR e um codec de producao: o MP4 nao o carrega e o ffmpeg recusa a combinacao.
@@ -237,10 +239,10 @@ def build_args(opts: dict, start: float, dur: float,
     a += ["-vf", vf]
     if fps:
         a += ["-fps_mode", "cfr", "-r", str(fps)]
-    else:
-        # "Original" tem que preservar o VFR da gravacao. Sem isto o encoder
-        # normalizava mesmo assim e a saida ficava identica a 60 fps.
-        a += ["-fps_mode", "passthrough"]
+    # Sem -r o encoder segue o framerate do material, mas sempre em CFR:
+    # reencodar normaliza os tempos em qualquer conteiner, com NVENC ou libx264
+    # (medido: entrada com 194 duracoes distintas sai com 1). Quem precisa do VFR
+    # original tem de usar o preset Original, que copia sem reprocessar.
 
     if codec == "h264":
         a += ["-c:v", "h264_nvenc", "-preset", "p6", "-profile:v", "high"]
