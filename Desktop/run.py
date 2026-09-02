@@ -25,7 +25,8 @@ from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
+from steamclipper import (AUDIO_CHOICES, CODECS, CONTAINERS, FPS_CHOICES,
+                          PRESETS, SCALES,
                           Config, Jobs, Mpv, estimate_mb, preset_opts,
                           scan_sessions, thumb, virtual, waveform)  # noqa: E402
 from steamclipper.export import (CUSTOM, CUSTOM_META, MIN_DURATION,
@@ -231,6 +232,7 @@ class CustomDialog(tk.Toplevel):
         self.fps = tk.StringVar(value=str(o.get("fps", 60)))
         self.quality = tk.IntVar(value=o.get("quality", 19))
         self.bitrate = tk.StringVar(value="")
+        self.audio = tk.StringVar(value=o.get("audio", "keep"))
         self.outdir = tk.StringVar(value=str(CFG.output))
         self.menus = []          # (var, wrap) para _refresh_menus
         self.fname = tk.StringVar(value=app.e_name.get().strip())
@@ -301,6 +303,16 @@ class CustomDialog(tk.Toplevel):
             "Deixe vazio para o encoder escolher pela qualidade.\n"
             "Preencha quando precisar de um tamanho previsível —\n"
             "ex.: 8000 kbps ≈ 60 MB por minuto.")
+
+        row(6, 0, "ÁUDIO", self._menu(grid, self.audio, list(AUDIO_CHOICES),
+                                      lambda v: self._est(),
+                                      lambda k: AUDIO_CHOICES[k]),
+            "O Steam grava jogo, Discord e microfone somados numa faixa só,\n"
+            "então não há fontes para separar aqui.\n\n"
+            "Normalizar nivela o volume em −14 LUFS, o alvo do YouTube e da\n"
+            "Twitch: suas gravações variam de −17 a −29 LUFS entre trechos,\n"
+            "e isso deixa todas parecidas sem estourar o pico.\n"
+            "Sem áudio remove a faixa por completo.")
 
         # ---- destino
         tk.Frame(self, bg=LINE, height=1).pack(fill="x", pady=(4, 16), **pad)
@@ -384,7 +396,7 @@ class CustomDialog(tk.Toplevel):
         return {"codec": self.codec.get(), "container": self.container.get(),
                 "scale": int(self.scale.get()), "fps": int(self.fps.get()),
                 "quality": int(self.quality.get()), "bitrate": br,
-                "outdir": self.outdir.get().strip()}
+                "audio": self.audio.get(), "outdir": self.outdir.get().strip()}
 
     def _est(self, *_):
         o = self._opts()
@@ -1298,8 +1310,10 @@ class App:
                    "dnxhr": "DNxHR"}.get(o.get("codec"), o.get("codec", ""))
             extra = (f"{int(o['bitrate'])} kbps" if o.get("bitrate")
                      else QUALITY_LEVELS.get(int(o.get("quality", 19)), "").split(" (")[0])
+            aud = {"none": " · sem áudio",
+                   "normalize": " · áudio nivelado"}.get(o.get("audio"), "")
             lbl[-1].config(text=f"{cod} · {res} · {o.get('container','mp4').upper()}\n"
-                                f"{extra}")
+                                f"{extra}{aud}")
         else:
             lbl[-1].config(text=CUSTOM_META["short"])
 

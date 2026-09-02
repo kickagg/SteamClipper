@@ -89,6 +89,20 @@ SCALES = {0: "Original", 1440: "1440p", 1080: "1080p", 720: "720p", 480: "480p"}
 # framerate constante. O rotulo agora diz o que realmente acontece.
 FPS_CHOICES = {0: "Do material (constante)", 60: "60 fps", 30: "30 fps"}
 
+# O Steam grava tudo - jogo, Discord, microfone - somado numa unica faixa
+# estereo, entao nao ha fontes para separar aqui. O que da para fazer e
+# nivelar o conjunto ou dispensa-lo.
+AUDIO_CHOICES = {
+    "keep": "Manter como está",
+    "normalize": "Normalizar volume",
+    "none": "Sem áudio",
+}
+
+# -14 LUFS e o alvo das plataformas (YouTube, Twitch). O material medido varia
+# de -17 a -29 LUFS entre trechos; uma passagem de loudnorm traz essa variacao
+# de 12 dB para 1,5 dB, e o teto de -1,5 dBTP evita corte no pico.
+LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
 
 # DNxHR e um codec de producao: o MP4 nao o carrega e o ffmpeg recusa a combinacao.
 CODEC_CONTAINERS = {
@@ -184,6 +198,9 @@ def sanitize(opts: dict) -> dict:
 
     br = int(o.get("bitrate") or 0)
     o["bitrate"] = max(0, min(MAX_BITRATE, br))
+
+    if o.get("audio") not in AUDIO_CHOICES:
+        o["audio"] = "keep"
     return o
 
 
@@ -192,18 +209,23 @@ def describe(opts: dict) -> str:
     codec = {"h264": "H.264", "hevc": "H.265", "copy": "Cópia direta",
              "dnxhr": "DNxHR HQ"}.get(opts.get("codec"), opts.get("codec", "?"))
     if opts.get("codec") == "copy":
-        return f"{codec} · {opts.get('container', 'mp4').upper()}"
+        extra = {"none": " · sem áudio",
+                 "normalize": " · áudio nivelado"}.get(opts.get("audio"), "")
+        return f"{codec} · {opts.get('container', 'mp4').upper()}{extra}"
     res = SCALES.get(int(opts.get("scale") or 0), "Original")
     fps = FPS_CHOICES.get(int(opts.get("fps") or 0), "Original")
     q = (f"{int(opts['bitrate'])} kbps" if opts.get("bitrate")
          else f"CQ {opts.get('quality', 19)}")
-    return f"{codec} · {res} · {fps} · {q} · {opts.get('container','mp4').upper()}"
+    aud = {"none": " · sem áudio", "normalize": " · áudio nivelado"}.get(
+        opts.get("audio"), "")
+    return (f"{codec} · {res} · {fps} · {q} · "
+            f"{opts.get('container','mp4').upper()}{aud}")
 
 
 def preset_opts(preset: str) -> dict:
     """Opcoes de um preset, prontas para o modal editar."""
     base = {"codec": "h264", "container": "mp4", "quality": 19,
-            "scale": 0, "fps": 60, "bitrate": 0}
+            "scale": 0, "fps": 60, "bitrate": 0, "audio": "keep"}
     base.update(PRESETS.get(preset, PRESETS["deliver"])["opts"])
     return base
 
@@ -215,6 +237,7 @@ def build_args(opts: dict, start: float, dur: float,
     fps = int(opts.get("fps") or 0)
     bitrate = int(opts.get("bitrate") or 0)
     quality = int(opts.get("quality", 19))
+    audio = opts.get("audio", "keep")
 
     a = ["ffmpeg", "-y", "-hide_banner", "-v", "warning", "-stats",
          "-progress", "pipe:1", "-nostdin"]
@@ -229,6 +252,12 @@ def build_args(opts: dict, start: float, dur: float,
         a += ["-t", f"{dur:.3f}"]
 
     if codec == "copy":
+        if audio == "none":
+            return a + ["-c:v", "copy", "-an"] + _tail(out)
+        if audio == "normalize" and afile:
+            # normalizar exige recodificar o audio; o video segue copiado
+            return a + ["-c:v", "copy", "-af", LOUDNORM,
+                        "-c:a", "aac", "-b:a", "192k"] + _tail(out)
         return a + ["-c", "copy"] + _tail(out)
 
     vf = TO_LIMITED
@@ -260,8 +289,13 @@ def build_args(opts: dict, start: float, dur: float,
         a += ["-color_range", "tv", "-colorspace", "bt709",
               "-color_primaries", "bt709", "-color_trc", "bt709"]
 
-    if afile:
-        a += ["-c:a", "pcm_s16le"] if codec == "dnxhr" else ["-c:a", "aac", "-b:a", "192k"]
+    if audio == "none" or not afile:
+        a += ["-an"]
+    else:
+        if audio == "normalize":
+            a += ["-af", LOUDNORM]
+        a += (["-c:a", "pcm_s16le"] if codec == "dnxhr"
+              else ["-c:a", "aac", "-b:a", "192k"])
     return a + _tail(out)
 
 
