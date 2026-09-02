@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from steamclipper import (CODECS, CONTAINERS, FPS_CHOICES, PRESETS, SCALES,
                           Config, Jobs, Mpv, estimate_mb, preset_opts,
-                          scan_sessions, thumb, virtual)  # noqa: E402
+                          scan_sessions, thumb, virtual, waveform)  # noqa: E402
 from steamclipper.export import (CUSTOM, CUSTOM_META, MIN_DURATION,
                                  format_estimate, human_mb, output_name,
                                  timecode)  # noqa: E402
@@ -43,6 +43,13 @@ AC, OK, WARN, ERR = "#4a9eff", "#3fb950", "#d29922", "#f85149"
 
 TILE_H = 56                       # altura da faixa da linha do tempo
 TILE_W = round(TILE_H * 16 / 9)   # 16:9, para o quadro nao distorcer
+RULER_H = 16                      # regua de tempo acima da faixa
+WAVE_H = 46                       # altura da forma de onda
+LINE2 = "#39414F"
+
+# Passos "redondos" da regua, do segundo a meia hora. O desenho escolhe o
+# primeiro que der pelo menos ~110px entre marcas no zoom atual.
+RULER_STEPS = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
 
 # CQ do NVENC com nome: o numero sozinho nao diz nada a quem so quer exportar.
 QUALITY_LEVELS = {15: "Máxima (15)", 19: "Alta (19)", 23: "Média (23)",
@@ -564,6 +571,10 @@ class App:
         self.pos = 0.0
         self.thumbs = {}          # tkinter descarta PhotoImage sem referencia viva
         self.tiles = {}           # quadros da linha do tempo
+        self.waves = {}           # picos de audio por sessao
+        self.playing = False      # o cursor so puxa a vista tocando
+        self.zoom = 1.0           # 1 = gravacao inteira na tela
+        self.view0 = 0.0          # inicio da janela visivel, em segundos
         self._tile_times = []
         self._tl_job = None
         self._fs = None           # janela de tela cheia do player
@@ -799,24 +810,200 @@ class App:
         b.pack(side="right"); Tooltip(b, "Tela cheia  (f) — Esc para sair")
 
     def _timeline(self, parent):
-        self.tl = tk.Canvas(parent, bg="#0a0d11", height=TILE_H + 2,
+        """Regua de tempo, faixa de quadros e forma de onda, no mesmo eixo."""
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="x", padx=20, pady=(10, 0))
+
+        self.ruler = tk.Canvas(wrap, bg=BG, height=RULER_H, highlightthickness=0)
+        self.ruler.pack(fill="x")
+
+        self.tl = tk.Canvas(wrap, bg="#0a0d11", height=TILE_H + 2,
                             highlightthickness=1, highlightbackground=LINE,
                             cursor="hand2")
-        self.tl.pack(fill="x", padx=20, pady=(10, 0))
-        self.tl.bind("<Button-1>", self._tl_down)
-        self.tl.bind("<B1-Motion>", self._tl_drag)
-        self.tl.bind("<ButtonRelease-1>", self._tl_up)
-        self.tl.bind("<Configure>", self._tl_resize)
+        self.tl.pack(fill="x")
 
-        row = tk.Frame(parent, bg=BG); row.pack(fill="x", padx=20)
-        self.t0_lbl = tk.Label(row, text="0:00", bg=BG, fg=TX3, font=self.fs)
+        self.wave = tk.Canvas(wrap, bg="#0a0d11", height=WAVE_H,
+                              highlightthickness=1, highlightbackground=LINE,
+                              cursor="hand2")
+        self.wave.pack(fill="x", pady=(2, 0))
+
+        for cv in (self.tl, self.wave):
+            cv.bind("<Button-1>", self._tl_down)
+            cv.bind("<B1-Motion>", self._tl_drag)
+            cv.bind("<ButtonRelease-1>", self._tl_up)
+            cv.bind("<MouseWheel>", self._tl_wheel)
+            cv.bind("<Button-2>", self._pan_start)
+            cv.bind("<B2-Motion>", self._pan_move)
+        self.tl.bind("<Configure>", self._tl_resize)
+        self.wave.bind("<Configure>", lambda e: self._draw_wave())
+        self.ruler.bind("<Configure>", lambda e: self._draw_ruler())
+
+        bar = tk.Frame(wrap, bg=BG)
+        bar.pack(fill="x", pady=(6, 0))
+        self.t0_lbl = tk.Label(bar, text="0:00", bg=BG, fg=TX3, font=self.fs)
         self.t0_lbl.pack(side="left")
-        self.t1_lbl = tk.Label(row, text="", bg=BG, fg=TX3, font=self.fs)
+        self.t1_lbl = tk.Label(bar, text="", bg=BG, fg=TX3, font=self.fs)
         self.t1_lbl.pack(side="right")
-        tk.Label(parent, text="Clique na linha do tempo para pular · arraste para marcar o trecho · "
-                              "espaço play · i / o marcam início e fim · ← → 5s",
+
+        zf = tk.Frame(bar, bg=BG)
+        zf.pack()
+        b = Flat(zf, "\u2212", lambda: self.zoom_by(1 / 1.8), pad=(11, 3), font=self.f)
+        b.pack(side="left")
+        Tooltip(b, "Afastar  (roda do mouse para baixo)")
+        self.zoom_lbl = tk.Label(zf, text="1x", bg=BG, fg=TX2, font=self.fm, width=7)
+        self.zoom_lbl.pack(side="left", padx=6)
+        b = Flat(zf, "+", lambda: self.zoom_by(1.8), pad=(11, 3), font=self.f)
+        b.pack(side="left")
+        Tooltip(b, "Aproximar  (roda do mouse para cima)")
+        b = Flat(zf, "tudo", self.zoom_fit, pad=(10, 3), font=self.fs)
+        b.pack(side="left", padx=(8, 0))
+        Tooltip(b, "Enquadra a grava\u00e7\u00e3o inteira")
+        b = Flat(zf, "trecho", self.zoom_selection, pad=(10, 3), font=self.fs)
+        b.pack(side="left", padx=4)
+        Tooltip(b, "Enquadra o trecho marcado")
+
+        tk.Label(parent,
+                 text="Clique para pular \u00b7 arraste para marcar \u00b7 roda do mouse "
+                      "aproxima \u00b7 bot\u00e3o do meio arrasta a vista \u00b7 "
+                      "espa\u00e7o play \u00b7 i / o marcam in\u00edcio e fim",
                  bg=BG, fg=TX3, font=self.fs, anchor="w").pack(fill="x", padx=20,
                                                                pady=(6, 8))
+
+    # ------------------------------------------------------------ zoom e vista
+    def view_span(self) -> float:
+        return (self.cur["seconds"] / self.zoom) if self.cur else 1.0
+
+    def _clamp_view(self):
+        total = self.cur["seconds"] if self.cur else 1.0
+        self.view0 = max(0.0, min(self.view0, total - self.view_span()))
+
+    def t_to_x(self, t: float, w: int) -> float:
+        return (t - self.view0) / self.view_span() * w
+
+    def x_to_t(self, x: float, w: int) -> float:
+        return self.view0 + (x / max(1, w)) * self.view_span()
+
+    def zoom_by(self, fator: float, centro=None):
+        """Aproxima mantendo fixo o instante sob o cursor."""
+        if not self.cur:
+            return
+        span = self.view_span()
+        if centro is None:
+            centro = (self.pos if self.view0 <= self.pos <= self.view0 + span
+                      else self.view0 + span / 2)
+        # piso do zoom mostra 1s de gravacao; teto e a gravacao inteira
+        self.zoom = max(1.0, min(self.cur["seconds"], self.zoom * fator))
+        self.view0 = centro - (centro - self.view0) * (self.view_span() / span)
+        self._clamp_view()
+        self._redraw_all()
+
+    def zoom_fit(self):
+        self.zoom, self.view0 = 1.0, 0.0
+        self._redraw_all()
+
+    def zoom_selection(self):
+        if not self.cur or self.out - self.inp < 0.5:
+            return
+        dur = self.out - self.inp
+        folga = dur * 0.15
+        self.zoom = max(1.0, self.cur["seconds"] / (dur + folga * 2))
+        self.view0 = self.inp - folga
+        self._clamp_view()
+        self._redraw_all()
+
+    def _tl_wheel(self, e):
+        w = max(1, e.widget.winfo_width())
+        self.zoom_by(1.25 if e.delta > 0 else 1 / 1.25, self.x_to_t(e.x, w))
+        return "break"
+
+    def _pan_start(self, e):
+        self._pan = (e.x, self.view0)
+
+    def _pan_move(self, e):
+        if not getattr(self, "_pan", None) or not self.cur:
+            return
+        x0, v0 = self._pan
+        w = max(1, e.widget.winfo_width())
+        self.view0 = v0 - (e.x - x0) / w * self.view_span()
+        self._clamp_view()
+        self._redraw_all()
+
+    def _redraw_all(self):
+        self._tl_resize()
+        self._draw_ruler()
+        self._draw_wave()
+        if self.cur:
+            self.zoom_lbl.config(text=(f"{self.zoom:.0f}x" if self.zoom >= 2
+                                       else "1x"))
+            self.t0_lbl.config(text=timecode(self.view0, False))
+            self.t1_lbl.config(text=timecode(self.view0 + self.view_span(), False))
+
+    # ------------------------------------------------------------ desenho
+    def _draw_ruler(self):
+        c = self.ruler
+        c.delete("all")
+        if not self.cur:
+            return
+        w = max(1, c.winfo_width())
+        span = self.view_span()
+        # passo redondo mais proximo de uma marca a cada ~110px de tela
+        alvo = span * 110 / w
+        passo = next((p for p in RULER_STEPS if p >= alvo), RULER_STEPS[-1])
+        t = int(self.view0 // passo) * passo
+        while t <= self.view0 + span:
+            x = self.t_to_x(t, w)
+            if -40 <= x <= w + 40:
+                c.create_line(x, RULER_H - 5, x, RULER_H, fill=LINE2)
+                c.create_text(x + 3, 0, text=timecode(t, False), anchor="nw",
+                              fill=TX3, font=self.fs)
+            t += passo
+
+    def _draw_wave(self):
+        c = self.wave
+        c.delete("all")
+        if not self.cur:
+            return
+        w = max(1, c.winfo_width())
+        mid = WAVE_H / 2
+        pk = self.waves.get(self.cur["id"])
+        if not pk:
+            c.create_text(w / 2, mid, text="analisando o \u00e1udio\u2026",
+                          fill=TX3, font=self.fs)
+            return
+        cols = waveform.column_peaks(pk, self.view0, self.view0 + self.view_span(), w)
+        sel0, sel1 = self.t_to_x(self.inp, w), self.t_to_x(self.out, w)
+        for x, v in enumerate(cols):
+            if v <= 0:
+                continue
+            alt = max(1.0, v / 255 * (mid - 2))
+            cor = AC if sel0 <= x <= sel1 else "#3d4d61"
+            c.create_line(x, mid - alt, x, mid + alt, fill=cor)
+        c.create_line(0, mid, w, mid, fill="#222a34")
+        self._overlay(c, WAVE_H, marcadores=False)
+
+    def _overlay(self, c, h, marcadores=True):
+        """Selecao, marcadores e cursor de leitura - iguais nas duas faixas."""
+        w = max(1, c.winfo_width())
+        x0, x1 = self.t_to_x(self.inp, w), self.t_to_x(self.out, w)
+        if x1 > 0 and x0 < w:
+            c.create_rectangle(max(x0, -2), 0, min(x1, w + 2), 3, fill=AC, outline="")
+            c.create_rectangle(max(x0, -2), h - 3, min(x1, w + 2), h, fill=AC,
+                               outline="")
+            c.create_rectangle(x0, 0, x1, h, outline=AC, width=1)
+            for hx in (x0, x1):
+                if -6 <= hx <= w + 6:
+                    c.create_rectangle(hx - 4, h / 2 - 12, hx + 4, h / 2 + 12,
+                                       fill=AC, outline="#0a0d11")
+                    c.create_line(hx, h / 2 - 6, hx, h / 2 + 6, fill="#0a0d11")
+        if marcadores:
+            for mk in self.cur["markers"]:
+                x = self.t_to_x(mk["t"], w)
+                if 0 <= x <= w:
+                    c.create_line(x, 0, x, 10, fill=WARN, width=2)
+        x = self.t_to_x(self.pos, w)
+        if -2 <= x <= w + 2:
+            c.create_line(x, 0, x, h, fill="white", width=2)
+            c.create_polygon(x - 5, 0, x + 5, 0, x, 7, fill="white", outline="")
 
     def _fit_video(self):
         """Encaixa o quadro do video no espaco livre mantendo a proporcao."""
@@ -976,9 +1163,11 @@ class App:
         clean = re.sub(r'[<>:"/\\|?*™®]', "", s["game"]).strip()
         self.e_name.delete(0, "end"); self.e_name.insert(0, f"{clean} {stamp}")
         self.video_hint.config(text="Abrindo no player…")
+        self.zoom, self.view0 = 1.0, 0.0
         self._sync()
         self._fit_video()
-        self._tl_resize()
+        self._redraw_all()
+        self._load_wave(s)
         self.open_player(0)
 
     def open_player(self, t):
@@ -1049,17 +1238,18 @@ class App:
             self.open_player(self.pos)
         else:
             self.mpv.command("seek", self.pos)
-        self._draw_tl()
+        self._follow_playhead()
+        self._repaint()
 
     def mark_in(self):
         self.inp = self.pos
         if self.out <= self.inp:
             self.out = min(self.cur["seconds"], self.inp + 30)
-        self._sync(); self._draw_tl()
+        self._sync(); self._repaint()
 
     def mark_out(self):
         self.out = max(self.inp + 1, self.pos)
-        self._sync(); self._draw_tl()
+        self._sync(); self._repaint()
 
     def set_preset(self, key):
         self.preset = key
@@ -1153,8 +1343,9 @@ class App:
 
     # ------------------------------------------------------- timeline
     def _tl_pos(self, e):
-        w = max(1, self.tl.winfo_width())
-        return max(0, min(1, e.x / w)) * self.cur["seconds"]
+        w = max(1, e.widget.winfo_width())
+        t = self.x_to_t(e.x, w)
+        return max(0.0, min(self.cur["seconds"], t))
 
     def _tl_down(self, e):
         if not self.cur:
@@ -1165,11 +1356,33 @@ class App:
         if not self.cur or not hasattr(self, "_down"):
             return
         t = self._tl_pos(e)
-        if abs(t - self._down) > self.cur["seconds"] * 0.004:
+        if abs(t - self._down) > self.view_span() * 0.004:
             self._moved = True
         if self._moved:
             self.inp, self.out = min(self._down, t), max(self._down, t)
-            self._sync(); self._draw_tl()
+            self._sync(); self._draw_tl(); self._draw_wave()
+
+    def _follow_playhead(self):
+        """Rola a vista para acompanhar a reproducao, sem sequestra-la.
+
+        So age quando o cursor sai pouco alem da borda durante a reproducao - o
+        avanco natural do video. Se ele esta longe, quem mandou na vista foi o
+        usuario (deu zoom num trecho, arrastou a vista) e a vista fica onde esta.
+        """
+        if not self.cur or self.zoom <= 1.0 or not self.playing:
+            return
+        span = self.view_span()
+        fim = self.view0 + span
+        if self.view0 <= self.pos <= fim:
+            return
+        if not (fim < self.pos <= fim + span * 0.5):
+            return                      # longe demais: foi navegacao, nao reproducao
+        self.view0 = self.pos - span * 0.25
+        self._clamp_view()
+        self._tl_resize()
+        self._draw_ruler()
+        self.t0_lbl.config(text=timecode(self.view0, False))
+        self.t1_lbl.config(text=timecode(self.view0 + span, False))
 
     def _tl_up(self, e):
         if not self.cur or not hasattr(self, "_down"):
@@ -1183,6 +1396,28 @@ class App:
         if self._tl_job:
             self.root.after_cancel(self._tl_job)
         self._tl_job = self.root.after(180, lambda: (self._load_tiles(), self._draw_tl()))
+
+    def _load_wave(self, s):
+        """Le os picos do cache ou dispara a analise; a faixa se redesenha sozinha."""
+        sid = s["id"]
+        if sid in self.waves:
+            return
+        pk = waveform.load(CFG, sid)
+        if pk:
+            self.waves[sid] = pk
+            self._draw_wave()
+            return
+
+        def pronto(dados):
+            def aplicar():
+                self.waves[sid] = dados
+                if self.cur and self.cur["id"] == sid:
+                    self._draw_wave()
+            try:
+                self.root.after(0, aplicar)
+            except tk.TclError:
+                pass
+        waveform.extract(CFG, sid, PORT, on_done=pronto)
 
     def _load_tiles(self):
         """Gera os quadros da linha do tempo no tamanho exato em que serao usados.
@@ -1199,7 +1434,8 @@ class App:
         if w < 50:
             return
         n = max(1, -(-w // TILE_W))            # ceil
-        want = [(i + 0.5) / n * s["seconds"] for i in range(n)]
+        span = self.view_span()
+        want = [self.view0 + (i + 0.5) / n * span for i in range(n)]
         self._tile_times = want
 
         def work():
@@ -1223,14 +1459,17 @@ class App:
                 self.root.after(0, apply)
         threading.Thread(target=work, daemon=True).start()
 
+    def _repaint(self):
+        """Redesenha as duas faixas sem regerar quadros - so a camada de cima."""
+        self._draw_tl()
+        self._draw_wave()
+
     def _draw_tl(self):
         c = self.tl
         c.delete("all")
         if not self.cur:
             return
         w, h = max(1, c.winfo_width()), TILE_H
-        total = self.cur["seconds"]
-
         for i, t in enumerate(getattr(self, "_tile_times", [])):
             img = self.tiles.get((self.cur["id"], int(t)))
             x = i * TILE_W
@@ -1239,34 +1478,15 @@ class App:
             else:
                 c.create_rectangle(x, 0, x + TILE_W, h,
                                    fill="#12171d" if i % 2 else "#161c23", outline="")
-
-        x0, x1 = self.inp / total * w, self.out / total * w
-        # O Canvas do tk nao tem canal alpha: qualquer preenchimento por cima
-        # esconde o quadro, e stipple vira xadrez. A selecao e marcada so pelas
-        # bordas - barras no topo e na base, laterais e alcas - deixando as
-        # miniaturas totalmente visiveis.
-        c.create_rectangle(x0, 0, x1, 3, fill=AC, outline="")
-        c.create_rectangle(x0, h - 3, x1, h, fill=AC, outline="")
-        c.create_rectangle(x0, 0, x1, h, outline=AC, width=1)
-        for hx in (x0, x1):                    # alcas de arrasto
-            c.create_rectangle(hx - 4, h / 2 - 12, hx + 4, h / 2 + 12,
-                               fill=AC, outline="#0a0d11")
-            c.create_line(hx, h / 2 - 6, hx, h / 2 + 6, fill="#0a0d11")
-
-        for mk in self.cur["markers"]:
-            x = mk["t"] / total * w
-            c.create_line(x, 0, x, 10, fill=WARN, width=2)
-
-        x = self.pos / total * w
-        c.create_line(x, 0, x, h, fill="white", width=2)
-        c.create_polygon(x - 5, 0, x + 5, 0, x, 7, fill="white", outline="")
+        self._overlay(c, h)
 
     def _name_changed(self):
         """Mostra o nome final e guarda a preferencia de sufixo."""
         if not self.cur:
             return
         dur = max(MIN_DURATION, self.out - self.inp)
-        ext = preset_opts(self.preset if self.preset != CUSTOM else "deliver")["container"]
+        base_preset = self.preset if self.preset != CUSTOM else "deliver"
+        ext = preset_opts(base_preset)["container"]
         if self.preset == CUSTOM and self.custom_opts:
             ext = self.custom_opts.get("container", ext)
         nome = output_name(self.e_name.get(), self.inp, dur, ext,
@@ -1274,7 +1494,7 @@ class App:
                            fallback=self.cur["game"])
         opts = (self.custom_opts if self.preset == CUSTOM and self.custom_opts
                 else preset_opts(self.preset))
-        self.name_preview.config(text=f"{nome}   ·   {format_estimate(opts, dur)}")
+        self.name_preview.config(text=f"{nome}   \u00b7   {format_estimate(opts, dur)}")
         if CFG.settings.get("name_suffix") != self.suffix_on.get():
             CFG.settings["name_suffix"] = self.suffix_on.get()
             from steamclipper.config import save_settings
@@ -1309,10 +1529,12 @@ class App:
         st = self.mpv.state()
         if st.get("open"):
             self.pos = st["pos"]
+            self.playing = not st["paused"]
             self.play_btn.config(text="▶" if st["paused"] else "⏸")
             if self.cur:
                 self.time_lbl.config(text=f"{fmt(self.pos)} / {fmt(self.cur['seconds'])}")
-            self._draw_tl()
+            self._follow_playhead()
+            self._repaint()
 
         jobs = JOBS.snapshot()
         if jobs:
